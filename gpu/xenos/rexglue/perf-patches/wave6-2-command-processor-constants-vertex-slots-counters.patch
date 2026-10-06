@@ -1,0 +1,445 @@
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -592,6 +592,11 @@
+   void InvalidateAllVertexBufferResidency();
+   void InvalidateVertexBufferResidency(uint32_t vfetch_index);
+   void InvalidateVertexBufferResidencyRange(uint32_t first_vfetch, uint32_t last_vfetch);
++  // R-comp: the slots whose range overlaps [address_first, address_last] (physical bytes) were rewritten by the CPU: they must be requested again.
++  void InvalidateVertexBufferStatesInRange(uint32_t address_first, uint32_t address_last);
++  static void VertexBufferWatchThunk(const std::unique_lock<std::recursive_mutex>& global_lock, void* context, uint32_t address_first,
++                                     uint32_t address_last, bool invalidated_by_gpu);
++  SharedMemory::GlobalWatchHandle vertex_buffer_watch_handle_ = nullptr;
+   // R-comp: memexport readback keeps one slot per frame in flight, so the fast
+   // path finds a completed copy when submissions complete several frames
+   // after they are made (PS5); resolve readback uses slots 0 and 1 only.
+@@ -689,6 +694,20 @@
+   // Tracks whether any draw in the current frame used an async placeholder
+   // graphics pipeline and may have produced incomplete output.
+   bool frame_used_async_placeholder_pipeline_ = false;
++  // R-comp: the draws dropped and the frames not presented because of placeholder pipelines (async compilation), and the frames presented, cumulative; what the last report saw.
++  uint64_t rcomp_placeholder_draws_ = 0;
++  uint64_t rcomp_skipped_presents_ = 0;
++  uint64_t rcomp_presented_frames_ = 0;
++  uint64_t rcomp_placeholder_draws_reported_ = 0;
++  uint64_t rcomp_skipped_presents_reported_ = 0;
++  uint64_t rcomp_presented_frames_reported_ = 0;
++  uint64_t rcomp_placeholder_last_report_frame_ = 0;
++  // R-comp: what the last RCOMP-HITCH-SOURCES line saw (translations, pipelines created: counts and nanoseconds), and the frame of that line.
++  uint64_t rcomp_hitch_translations_reported_ = 0;
++  uint64_t rcomp_hitch_translate_ns_reported_ = 0;
++  uint64_t rcomp_hitch_pipelines_reported_ = 0;
++  uint64_t rcomp_hitch_pipeline_ns_reported_ = 0;
++  uint64_t rcomp_hitch_last_report_frame_ = 0;
+   // Guest frame index, since some transient resources can be reused across
+   // submissions. Values updated in the beginning of a frame.
+   uint64_t frame_current_ = 1;
+@@ -732,6 +751,8 @@
+   void AwaitSubmitted(uint64_t submission);
+   void StopAsyncSubmitThread();
+   void AsyncSubmitRun();
++  bool skip_unchanged_constants_ = false;  // cvar rcomp_skip_unchanged_constants
++  uint32_t revalidate_frames_ = 1;         // cvar rcomp_revalidate_frames
+   bool async_submit_enabled_ = false;
+   // Cached cvars (RenderTargetCache::Update, overwrite_candidate_rts): the draw loop must not look them up.
+   bool elide_overwritten_depth_ = false;
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -73,6 +73,18 @@
+ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+                     "Submit command buffer when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++// R-comp: the guest rewrites shader constants with the values the registers already hold (phase 143: 44 % of the float constant writes, 11 % of the fetch constant
++// writes, 59 % of the single register writes). Such a write changes nothing and must not invalidate the constant buffers, the texture bindings or the vertex buffer residency.
++// R-comp: clear_memory_page_state revalidates every page the frame uses, every frame (the hash of the skip of identical uploads is 14.6 % of the command processor's time at 4K, phase 145).
++// With N > 1 the operation is applied to one Nth of the address space per frame: whatever changed without a guest write mark is read again within N frames, at 1/N of the cost.
++REXCVAR_DEFINE_INT32(rcomp_revalidate_frames, 1, "GPU/Vulkan",
++                     "With clear_memory_page_state on: spread its revalidation of the shared memory pages over this many frames (1 = every page every frame)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(rcomp_skip_unchanged_constants, true, "GPU/Vulkan",
++                    "Ignore the writes of shader constants (float, bool/loop, fetch) that carry the values the registers already hold")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ REXCVAR_DEFINE_BOOL(rcomp_async_submit, false, "GPU/Vulkan",
+                     "Replay the deferred commands into the Vulkan command buffer on a helper thread "
+@@ -675,6 +687,29 @@
+   vertex_buffers_in_sync_[vfetch_index >> 6] &= ~(uint64_t(1) << (vfetch_index & 63));
+ }
+ 
++void VulkanCommandProcessor::VertexBufferWatchThunk(const std::unique_lock<std::recursive_mutex>& /*global_lock*/, void* context,
++                                                    uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
++  if (!invalidated_by_gpu) {
++    static_cast<VulkanCommandProcessor*>(context)->InvalidateVertexBufferStatesInRange(address_first, address_last);
++  }
++}
++
++void VulkanCommandProcessor::InvalidateVertexBufferStatesInRange(uint32_t address_first, uint32_t address_last) {
++  for (uint32_t i = 0; i < vertex_buffer_states_.size(); ++i) {
++    VertexBufferState& state = vertex_buffer_states_[i];
++    if (state.address == UINT32_MAX) {
++      continue;
++    }
++    const uint64_t start = uint64_t(state.address) << 2;
++    const uint64_t end = start + (uint64_t(state.size) << 2);  // exclusive
++    if (start <= address_last && end > address_first) {
++      state.address = UINT32_MAX;
++      state.size = UINT32_MAX;
++      vertex_buffers_in_sync_[i >> 6] &= ~(uint64_t(1) << (i & 63));
++    }
++  }
++}
++
+ void VulkanCommandProcessor::InvalidateVertexBufferResidencyRange(uint32_t first_vfetch,
+                                                                   uint32_t last_vfetch) {
+   if (first_vfetch > last_vfetch) {
+@@ -714,7 +749,7 @@
+     return true;
+   }
+ 
+-  auto write_fallback_result = [sample_counts]() -> bool {
++  auto write_fallback_result = [this, sample_counts, sample_count_addr]() -> bool {
+     auto fake_sample_count = REXCVAR_GET(query_occlusion_fake_sample_count);
+     if (fake_sample_count < 0) {
+       return true;
+@@ -728,6 +763,7 @@
+       sample_counts->ZPass_A = fake_sample_count;
+       sample_counts->Total_A = fake_sample_count;
+     }
++    memory_->NoteCpWrite(sample_count_addr, sizeof(xenos::xe_gpu_depth_sample_counts));
+     return true;
+   };
+ 
+@@ -839,6 +875,8 @@
+   }
+   elide_overwritten_depth_ = REXCVAR_GET(rcomp_elide_overwritten_transfers);
+   elide_overwritten_color_ = REXCVAR_GET(rcomp_elide_overwritten_color_transfers);
++  skip_unchanged_constants_ = REXCVAR_GET(rcomp_skip_unchanged_constants);
++  revalidate_frames_ = uint32_t(std::max<int32_t>(REXCVAR_GET(rcomp_revalidate_frames), 1));
+   async_submit_enabled_ = REXCVAR_GET(rcomp_async_submit);
+   if (async_submit_enabled_) {
+     std::fprintf(stderr, "RCOMP-ASYNC-SUBMIT on chunk_kib=%d\n", int(REXCVAR_GET(rcomp_async_chunk_kib)));
+@@ -965,6 +1003,7 @@
+     REXGPU_ERROR("Failed to initialize shared memory");
+     return false;
+   }
++  vertex_buffer_watch_handle_ = shared_memory_->RegisterGlobalWatch(VertexBufferWatchThunk, this);
+ 
+   primitive_processor_ =
+       std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
+@@ -2096,6 +2135,10 @@
+ 
+   primitive_processor_.reset();
+ 
++  if (shared_memory_ && vertex_buffer_watch_handle_) {
++    shared_memory_->UnregisterGlobalWatch(vertex_buffer_watch_handle_);
++    vertex_buffer_watch_handle_ = nullptr;
++  }
+   shared_memory_.reset();
+ 
+   ClearTransientDescriptorPools();
+@@ -2193,6 +2236,27 @@
+   CommandProcessor::ShutdownContext();
+ }
+ 
++namespace {
++// True if the `count` registers hold exactly the big-endian words the guest wrote (what copy_and_swap would store).
++bool RcompRegistersEqualGuestWords(const uint32_t* registers, const uint32_t* guest_words, uint32_t count) {
++  uint32_t i = 0;
++  const __m128i swap_mask = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
++  for (; i + 4 <= count; i += 4) {
++    const __m128i have = _mm_loadu_si128(reinterpret_cast<const __m128i*>(registers + i));
++    const __m128i written = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(guest_words + i)), swap_mask);
++    if (_mm_movemask_epi8(_mm_cmpeq_epi8(have, written)) != 0xFFFF) {
++      return false;
++    }
++  }
++  for (; i < count; ++i) {
++    if (registers[i] != __builtin_bswap32(guest_words[i])) {
++      return false;
++    }
++  }
++  return true;
++}
++}  // namespace
++
+ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+   if (index < RegisterFile::kRegisterCount) {
+@@ -2202,6 +2266,13 @@
+     ++rcomp_state_epoch_;
+   }
+ #endif
++  if (skip_unchanged_constants_ && index < RegisterFile::kRegisterCount &&
++      ((index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) ||
++       (index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 && index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) ||
++       (index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 && index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31)) &&
++      register_file_->values[index] == value) {
++    return;
++  }
+   CommandProcessor::WriteRegister(index, value);
+ 
+   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
+@@ -2285,6 +2356,9 @@
+       }
+     }
+ #endif
++    if (skip_unchanged_constants_ && RcompRegistersEqualGuestWords(register_file_->values + start_index, base, num_registers)) {
++      return;
++    }
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+     if (frame_open_) {
+       uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
+@@ -2313,6 +2387,9 @@
+ 
+   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
+       end_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
++    if (skip_unchanged_constants_ && RcompRegistersEqualGuestWords(register_file_->values + start_index, base, num_registers)) {
++      return;
++    }
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+     current_constant_buffers_up_to_date_ &=
+         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
+@@ -2333,6 +2410,9 @@
+       }
+     }
+ #endif
++    if (skip_unchanged_constants_ && RcompRegistersEqualGuestWords(register_file_->values + start_index, base, num_registers)) {
++      return;
++    }
+     memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+     current_constant_buffers_up_to_date_ &=
+         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
+@@ -2378,6 +2458,50 @@
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+   shadow_skipping_ = false;
++  {
++    // R-comp: while pipelines are still being created (async compilation), the draws that need them are dropped and the frames that held one are not presented: the report of what the
++    // title did, with the clock, at most every 15 frames while the counts move.
++    static const auto rcomp_report_epoch = std::chrono::steady_clock::now();
++    if (frame_current_ <= 1 && rcomp_placeholder_last_report_frame_ == 0) {
++      std::fprintf(stderr, "RCOMP-ASYNC-PLACEHOLDER config async=%u skip_incomplete=%u creation_threads=%zu\n", unsigned(REXCVAR_GET(async_shader_compilation)),
++                   unsigned(REXCVAR_GET(vulkan_async_skip_incomplete_frames)), pipeline_cache_ ? pipeline_cache_->RcompCreationThreadCount() : size_t(0));
++      rcomp_placeholder_last_report_frame_ = 1;
++    }
++    if ((rcomp_placeholder_draws_ != rcomp_placeholder_draws_reported_ || rcomp_skipped_presents_ != rcomp_skipped_presents_reported_) &&
++        frame_current_ >= rcomp_placeholder_last_report_frame_ + 15) {
++      std::fprintf(stderr,
++                   "RCOMP-ASYNC-PLACEHOLDER frame=%llu t_ms=%lld placeholder_draws=%llu (+%llu) skipped_presents=%llu (+%llu) presented=%llu (+%llu) pending_pipelines=%zu pipelines=%zu\n",
++                   (unsigned long long)frame_current_,
++                   (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rcomp_report_epoch).count(),
++                   (unsigned long long)rcomp_placeholder_draws_, (unsigned long long)(rcomp_placeholder_draws_ - rcomp_placeholder_draws_reported_),
++                   (unsigned long long)rcomp_skipped_presents_, (unsigned long long)(rcomp_skipped_presents_ - rcomp_skipped_presents_reported_),
++                   (unsigned long long)rcomp_presented_frames_, (unsigned long long)(rcomp_presented_frames_ - rcomp_presented_frames_reported_),
++                   pipeline_cache_ ? pipeline_cache_->RcompPendingCreations() : size_t(0), pipeline_cache_ ? pipeline_cache_->RcompPipelineCount() : size_t(0));
++      rcomp_placeholder_draws_reported_ = rcomp_placeholder_draws_;
++      rcomp_skipped_presents_reported_ = rcomp_skipped_presents_;
++      rcomp_presented_frames_reported_ = rcomp_presented_frames_;
++      rcomp_placeholder_last_report_frame_ = frame_current_;
++    }
++    if (pipeline_cache_) {
++      const uint64_t translations = pipeline_cache_->RcompTranslations(), pipelines = pipeline_cache_->RcompPipelinesCreated();
++      if ((translations != rcomp_hitch_translations_reported_ || pipelines != rcomp_hitch_pipelines_reported_) && frame_current_ >= rcomp_hitch_last_report_frame_ + 30) {
++        const uint64_t translate_ns = pipeline_cache_->RcompTranslateNs(), pipeline_ns = pipeline_cache_->RcompPipelineCreateNs();
++        std::fprintf(stderr,
++                     "RCOMP-HITCH-SOURCES frame=%llu t_ms=%lld translations=%llu (+%llu, +%.1f ms) pipelines_created=%llu (+%llu, +%.1f ms)\n", (unsigned long long)frame_current_,
++                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rcomp_report_epoch).count(), (unsigned long long)translations,
++                     (unsigned long long)(translations - rcomp_hitch_translations_reported_), double(translate_ns - rcomp_hitch_translate_ns_reported_) * 1e-6,
++                     (unsigned long long)pipelines, (unsigned long long)(pipelines - rcomp_hitch_pipelines_reported_), double(pipeline_ns - rcomp_hitch_pipeline_ns_reported_) * 1e-6);
++        rcomp_hitch_translations_reported_ = translations;
++        rcomp_hitch_translate_ns_reported_ = translate_ns;
++        rcomp_hitch_pipelines_reported_ = pipelines;
++        rcomp_hitch_pipeline_ns_reported_ = pipeline_ns;
++        rcomp_hitch_last_report_frame_ = frame_current_;
++      }
++    }
++  }
++  if (shared_memory_) {
++    shared_memory_->RcompStaleAudit();
++  }
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+   ++rcomp_state_epoch_;
+   if ((rcomp_prof[22].load(std::memory_order_relaxed) % 120) == 0) {
+@@ -2412,6 +2536,7 @@
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+                                             frame_used_async_placeholder_pipeline_;
+   if (skip_present_due_async_placeholder) {
++    ++rcomp_skipped_presents_;
+     static bool skipped_incomplete_frame_logged = false;
+     if (!skipped_incomplete_frame_logged) {
+       skipped_incomplete_frame_logged = true;
+@@ -2532,6 +2657,7 @@
+   // Everything recorded so far goes to the replay thread now, while the swap commands are recorded.
+   AsyncChunkIfLarge(true);
+ 
++  ++rcomp_presented_frames_;
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
+@@ -4286,6 +4412,7 @@
+                                                 &pipeline_is_placeholder);
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+     frame_used_async_placeholder_pipeline_ = true;
++    ++rcomp_placeholder_draws_;
+     RcompDrawReason(4);
+     return true;
+   }
+@@ -4543,6 +4670,7 @@
+       }
+       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
+       if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
++        shared_memory_->RcompAuditUsedRange(vfetch_constant.address << 2, vfetch_constant.size << 2);
+         vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+         continue;
+       }
+@@ -4940,6 +5068,7 @@
+   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+     std::memcpy(memory_->TranslatePhysical(memexport_range.base_address_dwords << 2),
+                 readback_bytes, memexport_range.size_bytes);
++    memory_->NoteCpWrite(memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
+     readback_bytes += memexport_range.size_bytes;
+   }
+   dfn.vkUnmapMemory(device, readback_memory);
+@@ -5068,6 +5197,7 @@
+   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+     std::memcpy(memory_->TranslatePhysical(memexport_range.base_address_dwords << 2),
+                 readback_bytes, memexport_range.size_bytes);
++    memory_->NoteCpWrite(memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
+     readback_bytes += memexport_range.size_bytes;
+   }
+ 
+@@ -5403,6 +5533,7 @@
+     uint8_t* destination = memory_->TranslatePhysical(written_address);
+     if (destination) {
+       std::memcpy(destination, readback.mapped_data[read_index], written_length);
++      memory_->NoteCpWrite(written_address, written_length);
+     }
+   }
+ 
+@@ -5662,6 +5793,7 @@
+   sample_counts->ZFail_B = 0;
+   sample_counts->StencilFail_A = 0;
+   sample_counts->StencilFail_B = 0;
++  memory_->NoteCpWrite(sample_count_address, sizeof(xenos::xe_gpu_depth_sample_counts));
+ }
+ 
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+@@ -6655,7 +6787,17 @@
+ 
+   if (is_closing_frame) {
+     if (REXCVAR_GET(clear_memory_page_state) && shared_memory_) {
+-      shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
++      if (revalidate_frames_ > 1) {
++        uint32_t slice_first = 1, slice_last = 0;
++        shared_memory_->SetSystemPageBlocksValidWithGpuDataWrittenSlice(uint32_t(frame_current_ % revalidate_frames_), revalidate_frames_, &slice_first,
++                                                                        &slice_last);
++        // The vertex buffer slots skip the request of a buffer whose constants did not change: those in the slice are requested again, or the revalidation would not reach them.
++        if (slice_first <= slice_last) {
++          InvalidateVertexBufferStatesInRange(slice_first, slice_last);
++        }
++      } else {
++        shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
++      }
+     }
+     frame_open_ = false;
+     // Submission already closed now, so minus 1.
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -94,6 +94,15 @@
+       VulkanRenderTargetCache::RenderPassKey render_pass_key, VkPipeline& pipeline_out,
+       const PipelineLayoutProvider*& pipeline_layout_out, void** pipeline_handle_out = nullptr);
+   bool IsCreatingPipelines() const;
++  // R-comp: pipelines waiting for or being created by the creation threads, the number of such threads, the pipelines known.
++  size_t RcompPendingCreations() const;
++  // R-comp: shader translations and pipeline creations done synchronously on the command processor thread (cumulative counts and nanoseconds).
++  uint64_t RcompTranslations() const { return rcomp_translations_; }
++  uint64_t RcompTranslateNs() const { return rcomp_translate_ns_; }
++  uint64_t RcompPipelinesCreated() const { return rcomp_pipelines_created_; }
++  uint64_t RcompPipelineCreateNs() const { return rcomp_pipeline_create_ns_; }
++  size_t RcompCreationThreadCount() const { return creation_threads_.size(); }
++  size_t RcompPipelineCount() const { return pipelines_.size(); }
+   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
+                                     const PipelineLayoutProvider*& pipeline_layout_out,
+                                     bool* is_placeholder_out = nullptr) const;
+@@ -457,6 +466,11 @@
+   bool storage_write_thread_shutdown_ = false;
+   std::unique_ptr<rex::thread::Thread> storage_write_thread_;
+ 
++  uint64_t rcomp_translations_ = 0;
++  uint64_t rcomp_translate_ns_ = 0;
++  uint64_t rcomp_pipelines_created_ = 0;
++  uint64_t rcomp_pipeline_create_ns_ = 0;
++
+   mutable std::mutex creation_request_lock_;
+   std::condition_variable creation_request_cond_;
+   std::priority_queue<PipelineCreationArguments, std::vector<PipelineCreationArguments>,
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -43,6 +43,7 @@
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/vulkan/command_processor.h>
+ #include <rex/graphics/vulkan/pipeline_cache.h>
++#include <chrono>
+ #include <rex/graphics/vulkan/shader.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/hash.h>
+@@ -1022,8 +1023,12 @@
+                   xenos::VertexShaderExportMode::kPosition2VectorsEdgeKill);
+   assert_false(register_file_.Get<reg::SQ_PROGRAM_CNTL>().gen_index_vtx);
+   if (!vertex_shader->is_translated()) {
++    const auto rcomp_translate_start = std::chrono::steady_clock::now();
+     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
+-    if (!TranslateAnalyzedShader(*shader_translator_, *vertex_shader)) {
++    const bool rcomp_translated = TranslateAnalyzedShader(*shader_translator_, *vertex_shader);
++    rcomp_translate_ns_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rcomp_translate_start).count());
++    ++rcomp_translations_;
++    if (!rcomp_translated) {
+       REXGPU_ERROR("Failed to translate the vertex shader!");
+       return false;
+     }
+@@ -1034,8 +1039,12 @@
+   }
+   if (pixel_shader != nullptr) {
+     if (!pixel_shader->is_translated()) {
++      const auto rcomp_translate_start = std::chrono::steady_clock::now();
+       pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
+-      if (!TranslateAnalyzedShader(*shader_translator_, *pixel_shader)) {
++      const bool rcomp_translated = TranslateAnalyzedShader(*shader_translator_, *pixel_shader);
++      rcomp_translate_ns_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rcomp_translate_start).count());
++      ++rcomp_translations_;
++      if (!rcomp_translated) {
+         REXGPU_ERROR("Failed to translate the pixel shader!");
+         return false;
+       }
+@@ -1179,9 +1188,15 @@
+     }
+   }
+ 
+-  if (!queued_async_creation && !EnsurePipelineCreated(creation_arguments_real)) {
+-    pipelines_.erase(description);
+-    return false;
++  if (!queued_async_creation) {
++    const auto rcomp_create_start = std::chrono::steady_clock::now();
++    const bool rcomp_created = EnsurePipelineCreated(creation_arguments_real);
++    rcomp_pipeline_create_ns_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rcomp_create_start).count());
++    ++rcomp_pipelines_created_;
++    if (!rcomp_created) {
++      pipelines_.erase(description);
++      return false;
++    }
+   }
+   if (!queued_async_creation) {
+     pipeline.second.is_placeholder.store(false, std::memory_order_release);
+@@ -1206,6 +1221,11 @@
+     *pipeline_handle_out = &pipeline.second;
+   }
+   return pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr;
++}
++
++size_t VulkanPipelineCache::RcompPendingCreations() const {
++  std::lock_guard<std::mutex> lock(creation_request_lock_);
++  return creation_queue_.size() + creation_threads_busy_;
+ }
+ 
+ bool VulkanPipelineCache::IsCreatingPipelines() const {

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R-comp Installer</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">R</span><div><h1>R-comp Installer</h1><p>Xbox 360 recompiled title → PS5 app → console</p></div></div>
+  <div id="console-pill" class="pill">console: …</div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="check" class="active">Check a game</button>
+  <button data-tab="install">1 · Install app</button>
+  <button data-tab="package">2 · Package artifacts</button>
+  <button data-tab="recompile">3 · Recompile from ISO</button>
+  <button data-tab="console">Console</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<main>
+<section id="tab-check" class="tab active">
+  <div class="card">
+    <h2>Check a game</h2>
+    <p class="hint">Pick one of your Xbox 360 disc images. R-comp's real tools read the disc and recompile its code, then the
+      report says what works, what is missing and whether the game can be tried on the PS5 now. A work order for adding the
+      missing support is written next to the report.</p>
+    <div class="pick"><input id="k-src" placeholder="Xbox 360 disc image (.iso) or extracted disc folder">
+      <button data-pick="k-src" data-mode="file">ISO…</button><button data-pick="k-src" data-mode="dir">Folder…</button></div>
+    <div class="actions"><button class="primary" id="k-go">Check this game</button>
+      <select id="k-history"><option value="">Previous checks…</option></select></div>
+  </div>
+  <div id="k-report" class="card report hidden"></div>
+  <div class="card">
+    <h2>All games</h2>
+    <p class="hint">Test as many games as you like: every check and every PS5 result is stored, then gathered into one
+      backlog that ranks the missing functions (first those a game really called on the PS5, then those the most games
+      need). "Export for the AI" downloads that whole list as one self-contained file to hand over in one go.</p>
+    <div class="pick"><input id="k-isos" placeholder="Folder of disc images (empty: the one in Settings)">
+      <button data-pick="k-isos" data-mode="dir">Folder…</button></div>
+    <div class="actions"><button class="primary" id="k-all">Check all</button>
+      <label class="check"><input type="checkbox" id="k-force"> Check again the discs already checked</label>
+      <button id="k-export">Export for the AI</button></div>
+    <div id="k-backlog"></div>
+  </div>
+</section>
+
+<section id="tab-install" class="tab">
+  <div class="card">
+    <h2>Install a finished app folder</h2>
+    <p class="hint">Uploads the folder to <code>/data/homebrew/&lt;id&gt;</code> over FTP, reads every file back (SHA-256),
+      sets mode 0777 with the chmod payload, adds the folder to ShadowMount+'s <code>manual.lst</code> (after a backup)
+      and waits until <code>manual.status</code> and <code>/system_ex/app/&lt;id&gt;</code> confirm it.</p>
+    <div class="field"><label>App folder</label><div class="pick"><input id="i-app" placeholder="…\PPSA88370"><button data-pick="i-app" data-mode="dir">Browse</button></div></div>
+    <div id="i-preview" class="preview hidden"></div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="i-register" checked> Register with ShadowMount+ (home screen)</label>
+      <label class="check"><input type="checkbox" id="i-overwrite"> Overwrite a different title already using this id</label>
+    </div>
+    <div class="actions"><button class="primary" id="i-go">Install to the PS5</button></div>
+  </div>
+</section>
+
+<section id="tab-package" class="tab">
+  <div class="card">
+    <h2>Package recompiled artifacts into an app folder</h2>
+    <p class="hint">Reads the title id, name and image from the decoded XEX, then assembles <code>eboot.bin</code>,
+      <code>sce_sys/param.json</code>, <code>sce_sys/icon0.png</code> (512×512), <code>sce_module/libc.prx</code>,
+      <code>image/plain.xex</code>, <code>game/</code> and <code>manifest.sha256</code>.</p>
+    <div class="grid2">
+      <div class="field"><label>eboot.bin (linked, fake-signed)</label><div class="pick"><input id="p-eboot"><button data-pick="p-eboot" data-mode="file">Browse</button></div></div>
+      <div class="field"><label>Decoded XEX (image/plain.xex)</label><div class="pick"><input id="p-xex"><button data-pick="p-xex" data-mode="file">Browse</button></div></div>
+      <div class="field"><label>Game files folder (becomes game/)</label><div class="pick"><input id="p-game"><button data-pick="p-game" data-mode="dir">Browse</button></div></div>
+      <div class="field"><label>libc.prx</label><div class="pick"><input id="p-libc"><button data-pick="p-libc" data-mode="file">Browse</button></div></div>
+    </div>
+    <div id="p-xexinfo" class="preview hidden"></div>
+    <div class="grid3">
+      <div class="field"><label>PS5 title id</label><input id="p-tid" placeholder="PPSA88370" maxlength="9"><small id="p-tid-note" class="note"></small></div>
+      <div class="field"><label>Display name</label><input id="p-name" placeholder="from the XEX"></div>
+      <div class="field"><label>Icon override (PNG, optional)</label><div class="pick"><input id="p-icon"><button data-pick="p-icon" data-mode="file">Browse</button></div></div>
+    </div>
+    <div class="field"><label>Output folder (the app goes to &lt;output&gt;\&lt;title id&gt;)</label><div class="pick"><input id="p-out"><button data-pick="p-out" data-mode="dir">Browse</button></div></div>
+    <label class="check"><input type="checkbox" id="p-replace"> Replace a previous assembly of this tool in the output folder</label>
+    <div class="actions"><button class="primary" id="p-go">Build the app folder</button><button id="p-install" class="hidden">Install it →</button></div>
+  </div>
+</section>
+
+<section id="tab-recompile" class="tab">
+  <div class="card">
+    <h2>Recompile from the disc → app folder</h2>
+    <p class="hint">Drives the real R-comp pipeline: <code>extract-xiso</code> → <code>m6_inventory.py</code>
+      (XenonAnalyse + XenonRecomp) → <code>build_ps5_archives.sh</code> (AOT C++) → <code>build-radv-probes.sh game</code>
+      (pinned RADV link, fake SELF) → app folder. Tens of minutes to hours. Titles R-comp does not support yet stop
+      with BLOCKED or FAIL and the real logs.</p>
+    <div class="field"><label>Xbox 360 ISO, or an extracted disc folder (with default.xex)</label>
+      <div class="pick"><input id="r-src"><button data-pick="r-src" data-mode="file">ISO…</button><button data-pick="r-src" data-mode="dir">Folder…</button></div></div>
+    <div class="grid3">
+      <div class="field"><label>PS5 title id</label><input id="r-tid" placeholder="PPSA88370" maxlength="9"><small id="r-tid-note" class="note"></small></div>
+      <div class="field"><label>Display name (empty: from the XEX)</label><input id="r-name"></div>
+      <div class="field"><label>Build profile</label><select id="r-profile"><option value="auto" selected>Auto (from the disc)</option></select><small id="r-profile-note" class="note"></small></div>
+    </div>
+    <div class="grid3">
+      <div class="field"><label>Render scale</label><select id="r-scale"><option value="3" selected>3 — 3840×2160 (4K)</option><option value="2">2 — 2560×1440</option><option value="1">1 — 1280×720</option></select></div>
+    </div>
+    <div class="grid3">
+      <div class="field"><label>Parallel compile jobs</label><input id="r-jobs" type="number" min="1" max="32" value="8"></div>
+      <div class="field"><label>Output folder</label><div class="pick"><input id="r-out"><button data-pick="r-out" data-mode="dir">Browse</button></div></div>
+      <div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="r-exploratory"> Exploratory build (link despite listed missing imports; they stay fatal on call)</label></div>
+    </div>
+    <label class="check"><input type="checkbox" id="r-replace"> Replace a previous assembly of this tool in the output folder</label>
+    <div class="actions"><button class="primary" id="r-go">Start the pipeline</button><button id="r-resume" class="hidden">Resume</button><button id="r-install" class="hidden">Install it →</button><button id="r-tools">Check toolchain</button></div>
+    <div id="r-toolreport" class="hidden"></div>
+  </div>
+</section>
+
+<section id="tab-console" class="tab">
+  <div class="card">
+    <div class="titlebar"><h2>Console</h2><div><button id="c-refresh">Refresh</button> <button id="c-ctl">Load ps5vkctl</button> <button id="c-klog">Kernel log (30 s)</button></div></div>
+    <div id="c-status" class="status-grid"></div>
+    <table id="c-titles"><thead><tr><th>Id</th><th>Name</th><th>Folder</th><th>manual.lst</th><th>manual.status</th><th>/system_ex/app</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section id="tab-settings" class="tab">
+  <div class="card">
+    <h2>Settings</h2>
+    <form id="s-form" class="grid2"></form>
+    <div class="actions"><button class="primary" id="s-save">Save</button><button id="s-payload">Build chmod payload now</button></div>
+  </div>
+</section>
+</main>
+
+<section id="log-dock">
+  <div class="dock-head">
+    <select id="job-select"></select>
+    <span id="job-status" class="badge">idle</span>
+    <span id="job-summary"></span>
+    <span class="spacer"></span>
+    <label class="check small"><input type="checkbox" id="log-follow" checked> follow</label>
+    <button id="job-cancel" class="hidden">Cancel</button>
+  </div>
+  <pre id="log"></pre>
+</section>
+
+<dialog id="picker">
+  <div class="picker-head"><button id="pk-up">↑</button><input id="pk-path"><button id="pk-go">Go</button></div>
+  <ul id="pk-list"></ul>
+  <div class="picker-foot"><span id="pk-hint"></span><span class="spacer"></span><button id="pk-cancel">Cancel</button><button class="primary" id="pk-choose">Choose this folder</button></div>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/xenia-project/xenia/95a5c3ee250f80c3b9d139658649d9ffb6db3eec/src/xenia/cpu/ppc/ppc_emit_altivec.cc",
+    "file": "xenia-ppc-emit-altivec.cc",
+    "sha256": "da7584e000f2965a49c8ccbc2e6989da7afc54dca2979fedf327415305dde943"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/xenia-project/xenia/95a5c3ee250f80c3b9d139658649d9ffb6db3eec/src/xenia/cpu/backend/x64/x64_sequences.cc",
+    "file": "xenia-x64-sequences.cc",
+    "sha256": "5190df65b371d5334eb6e92c24ec4b7c4be84f700f281feda34ba6839b6e7a82"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/xenia-project/xenia/95a5c3ee250f80c3b9d139658649d9ffb6db3eec/src/xenia/cpu/ppc/ppc_emit_fpu.cc",
+    "file": "xenia-ppc-emit-fpu.cc",
+    "sha256": "d00ce9b79b9b0b00ff49642f76db56e79a48942dad7d38c714e9b29ac4d53e22"
+  },
+  {
+    "url": "https://powerpc.dev/general/PPC_Vers202_Book1_public.pdf",
+    "file": "ppc-book1-v2.02.pdf",
+    "sha256": "d7802da975d0787feb5fecebec8116cf0b9413716c838037d8397cb623055246"
+  },
+  {
+    "url": "https://powerpc.dev/general/PPC_Vers202_Book2_public.pdf",
+    "file": "ppc-book2-v2.02.pdf",
+    "sha256": "de200ba659e0d1e4bd93554d2825357fe0389b3062c1d629161093d627cdc82b"
+  }
+]

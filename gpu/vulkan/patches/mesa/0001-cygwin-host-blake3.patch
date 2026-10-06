@@ -1,0 +1,16 @@
+diff --git a/src/util/blake3/meson.build b/src/util/blake3/meson.build
+--- a/src/util/blake3/meson.build
++++ b/src/util/blake3/meson.build
+@@ -11,7 +11,11 @@ cpu_family = host_machine.cpu_family()
+ 
+ blake3_x86_no_simd_defs = ['-DBLAKE3_NO_SSE2', '-DBLAKE3_NO_SSE41', '-DBLAKE3_NO_AVX2', '-DBLAKE3_NO_AVX512']
+ 
+-if cpu_family == 'x86_64'
++# Cygwin's PE assembler does not implement ELF .hidden directives. The
++# portable implementation is sufficient for native shader-generator hashes.
++if host_machine.system() == 'cygwin'
++  blake3_defs += blake3_x86_no_simd_defs
++elif cpu_family == 'x86_64'
+   if is_windows
+     if is_msvc
+       # An up-to-date version of Meson, not using the VS backend is needed.

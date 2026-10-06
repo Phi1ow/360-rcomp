@@ -1,0 +1,683 @@
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <rcomp_xenos/host_thread.h>
+ #include <rcomp_xenos/texture_descriptor_snapshot.h>
+ /**
+  ******************************************************************************
+@@ -13,10 +14,13 @@
+  */
+ 
+ #include <array>
++#include <atomic>
+ #include <climits>
++#include <condition_variable>
+ #include <cstdint>
+ #include <cstdio>
+ #include <deque>
++#include <mutex>
+ #include <functional>
+ #include <memory>
+ #include <string>
+@@ -520,6 +524,8 @@
+   // clearing and stopping capturing. Returns whether the submission was done
+   // successfully, if it has failed, leaves it open.
+   bool EndSubmission(bool is_swap);
++  // Makes sure a command pool and buffer are ready for the next submission.
++  bool EnsureCommandBufferWritable();
+   bool AwaitAllQueueOperationsCompletion() {
+     CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
+     return !submission_open_ && submissions_in_flight_fences_.empty();
+@@ -661,6 +667,44 @@
+   std::vector<CommandBuffer> command_buffers_writable_;
+   std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
+   DeferredCommandBuffer deferred_command_buffer_;
++
++  // R-comp overlapped replay (cvar rcomp_async_submit). The deferred commands of a submission are
++  // replayed into its Vulkan command buffer by a helper thread while the command processor goes on
++  // recording: whole commands are handed over in chunks (HandOffChunk) between draws once
++  // rcomp_async_chunk_kib KiB are recorded, the last chunk of a submission also ends the command
++  // buffer and submits it, so there is still one vkQueueSubmit per submission, in submission order.
++  // The command processor waits for a submit (AwaitSubmitted) only where it has to know the work is
++  // on the queue: before it hands the swap image to the presenter, and before it blocks on a fence.
++  struct AsyncChunk {
++    std::unique_ptr<DeferredCommandBuffer> commands;
++    CommandBuffer command_buffer = {};
++    bool first = false;
++    bool last = false;
++    // Of the last chunk of a submission.
++    VkFence fence = VK_NULL_HANDLE;
++    uint64_t submission = 0;
++    std::vector<VkSemaphore> wait_semaphores;
++    std::vector<VkPipelineStageFlags> wait_stage_masks;
++  };
++  void HandOffChunk(bool last, VkFence fence);
++  void AsyncChunkIfLarge();
++  void AwaitSubmitted(uint64_t submission);
++  void StopAsyncSubmitThread();
++  void AsyncSubmitRun();
++  bool async_submit_enabled_ = false;
++  rcomp::xenos::HostThread async_thread_;
++  std::mutex async_mutex_;
++  std::condition_variable async_wake_;
++  std::condition_variable async_done_;
++  std::deque<AsyncChunk> async_queue_;
++  // Replayed buffers to reuse (their command streams keep their capacity).
++  std::vector<std::unique_ptr<DeferredCommandBuffer>> async_spare_;
++  bool async_stop_ = false;
++  // The highest submission index whose last chunk has been submitted to the queue.
++  std::atomic<uint64_t> async_submitted_through_{0};
++  // The submission being recorded has handed over chunks; this is its command buffer.
++  bool async_in_submission_ = false;
++  CommandBuffer async_command_buffer_ = {};
+ 
+   std::vector<VkSparseMemoryBind> sparse_memory_binds_;
+   std::vector<SparseBufferBind> sparse_buffer_binds_;
+diff -ruN a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -30,6 +30,11 @@
+ 
+   void Reset();
+   void Execute(VkCommandBuffer command_buffer);
++
++  // R-comp overlapped replay: the recorded commands (whole commands only: call this between draws)
++  // move to `other`, which another thread replays with Execute while this buffer records on.
++  size_t SizeBytes() const { return command_stream_.size() * sizeof(uintmax_t); }
++  void SwapStream(DeferredCommandBuffer& other) { command_stream_.swap(other.command_stream_); }
+ 
+   // render_pass_begin->pNext of all barriers must be null.
+   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,
+diff -ruN a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -324,8 +324,7 @@
+   uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+   uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+ 
+-  // Clip-space position (x, y, w) of the three guest vertices; the host synthesizes the fourth as
+-  // position 1 - position 0 + position 2 (see the rectangle list handling in the SPIR-V translator).
++  // Clip-space position (x, y, w) of the three guest vertices and of the fourth one the host synthesizes.
+   float position[4][3];
+   shader_interpreter_.SetShader(vertex_shader);
+   PositionYExportSink export_sink;
+@@ -372,15 +371,6 @@
+   if (!valid) {
+     return false;
+   }
+-  for (uint32_t k = 0; k < 3; ++k) {
+-    position[3][k] = position[1][k] - position[0][k] + position[2][k];
+-  }
+-  for (uint32_t i = 0; i < 4; ++i) {
+-    for (uint32_t k = 0; k < 3; ++k) {
+-      last_rectangle_positions_[i][k] = position[i][k];
+-    }
+-  }
+-
+   // The same transformation as for the Y of EstimateVertexMaxY, now for both axes.
+   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
+   float scale_x = pa_cl_vte_cntl.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f;
+@@ -399,7 +389,7 @@
+     window_y = float(int32_t(pa_sc_window_offset.window_y_offset));
+   }
+   float xs[4], ys[4];
+-  for (uint32_t i = 0; i < 4; ++i) {
++  const auto to_screen = [&](uint32_t i) {
+     float x = position[i][0];
+     float y = position[i][1];
+     if (!pa_cl_vte_cntl.vtx_xy_fmt) {
+@@ -419,6 +409,36 @@
+     }
+     xs[i] = x;
+     ys[i] = y;
++    return true;
++  };
++  for (uint32_t i = 0; i < 3; ++i) {
++    if (!to_screen(i)) {
++      return false;
++    }
++  }
++  // The host geometry shader builds the fourth vertex by mirroring the vertex opposite the longest edge
++  // across that edge (see the rectangle list handling in the SPIR-V translator): the corner of the
++  // rectangle between the two other vertices, v3 = va + vb - vcorner, whichever of the three vertices
++  // it is.
++  const auto edge_length_squared = [&](uint32_t from, uint32_t to) {
++    const float dx = xs[to] - xs[from];
++    const float dy = ys[to] - ys[from];
++    return dx * dx + dy * dy;
++  };
++  const float edge_12 = edge_length_squared(1, 2);
++  const float edge_20 = edge_length_squared(2, 0);
++  const float edge_01 = edge_length_squared(0, 1);
++  const uint32_t corner = (edge_12 > edge_20 && edge_12 > edge_01) ? 0 : (edge_20 > edge_01 ? 1 : 2);
++  for (uint32_t k = 0; k < 3; ++k) {
++    position[3][k] = position[(corner + 1) % 3][k] + position[(corner + 2) % 3][k] - position[corner][k];
++  }
++  for (uint32_t i = 0; i < 4; ++i) {
++    for (uint32_t k = 0; k < 3; ++k) {
++      last_rectangle_positions_[i][k] = position[i][k];
++    }
++  }
++  if (!to_screen(3)) {
++    return false;
+   }
+   float min_x = std::min(std::min(xs[0], xs[1]), std::min(xs[2], xs[3]));
+   float max_x = std::max(std::max(xs[0], xs[1]), std::max(xs[2], xs[3]));
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -72,6 +72,17 @@
+ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+                     "Submit command buffer when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(rcomp_async_submit, false, "GPU/Vulkan",
++                    "Replay the deferred commands into the Vulkan command buffer on a helper thread "
++                    "while the command processor goes on recording (one submit per submission, in "
++                    "order)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_INT32(rcomp_async_chunk_kib, 256, "GPU/Vulkan",
++                     "Size in KiB of the deferred commands handed to the replay thread at a time")
++    .range(16, 16384)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+@@ -793,6 +804,11 @@
+   }
+   InvalidateAllVertexBufferResidency();
+ 
++  async_submit_enabled_ = REXCVAR_GET(rcomp_async_submit);
++  if (async_submit_enabled_) {
++    std::fprintf(stderr, "RCOMP-ASYNC-SUBMIT on chunk_kib=%d\n", int(REXCVAR_GET(rcomp_async_chunk_kib)));
++  }
++
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+@@ -1916,6 +1932,7 @@
+ 
+ void VulkanCommandProcessor::ShutdownContext() {
+   AwaitAllQueueOperationsCompletion();
++  StopAsyncSubmitThread();
+   InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+ 
+@@ -4543,6 +4560,7 @@
+   }
+ #endif
+   RcompDrawReason(0);
++  AsyncChunkIfLarge();
+   return true;
+ }
+ 
+@@ -4770,6 +4788,7 @@
+                                                written_address, written_length);
+     }
+     RcompGpuMark(0);
++    AsyncChunkIfLarge();
+     return resolved;
+   }
+ 
+@@ -5353,6 +5372,11 @@
+     // synchronization scope all commands that occur earlier in submission
+     // order."
+     VkResult wait_result;
++    if (async_submit_enabled_) {
++      // A fence of a submission still being handed to the queue cannot be waited for yet.
++      RcompProfScope rcomp_prof_await(58);
++      AwaitSubmitted(await_submission);
++    }
+     {
+       RcompProfScope rcomp_prof_wait(6);
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+@@ -5381,6 +5405,12 @@
+   // submission themselves can be executed out of order, but Xenia serializes
+   // that for simplicity.
+   while (fences_awaited < fences_total) {
++    if (async_submit_enabled_ &&
++        submission_completed_ + fences_awaited + 1 >
++            async_submitted_through_.load(std::memory_order_acquire)) {
++      // Not on the queue yet.
++      break;
++    }
+     VkResult fence_status =
+         dfn.vkWaitForFences(device, 1, &submissions_in_flight_fences_[fences_awaited], VK_TRUE, 0);
+     if (fence_status != VK_SUCCESS) {
+@@ -5961,6 +5991,40 @@
+   return true;
+ }
+ 
++bool VulkanCommandProcessor::EnsureCommandBufferWritable() {
++  if (!command_buffers_writable_.empty()) {
++    return true;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  CommandBuffer command_buffer;
++  VkCommandPoolCreateInfo command_pool_create_info;
++  command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
++  command_pool_create_info.pNext = nullptr;
++  command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
++  command_pool_create_info.queueFamilyIndex = vulkan_device->queue_family_graphics_compute();
++  if (dfn.vkCreateCommandPool(device, &command_pool_create_info, nullptr, &command_buffer.pool) !=
++      VK_SUCCESS) {
++    REXGPU_ERROR("Failed to create a Vulkan command pool");
++    return false;
++  }
++  VkCommandBufferAllocateInfo command_buffer_allocate_info;
++  command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++  command_buffer_allocate_info.pNext = nullptr;
++  command_buffer_allocate_info.commandPool = command_buffer.pool;
++  command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++  command_buffer_allocate_info.commandBufferCount = 1;
++  if (dfn.vkAllocateCommandBuffers(device, &command_buffer_allocate_info, &command_buffer.buffer) !=
++      VK_SUCCESS) {
++    REXGPU_ERROR("Failed to allocate a Vulkan command buffer");
++    dfn.vkDestroyCommandPool(device, command_buffer.pool, nullptr);
++    return false;
++  }
++  command_buffers_writable_.push_back(command_buffer);
++  return true;
++}
++
+ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+@@ -5995,31 +6059,8 @@
+       }
+       semaphores_free_.push_back(semaphore);
+     }
+-    if (command_buffers_writable_.empty()) {
+-      CommandBuffer command_buffer;
+-      VkCommandPoolCreateInfo command_pool_create_info;
+-      command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+-      command_pool_create_info.pNext = nullptr;
+-      command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+-      command_pool_create_info.queueFamilyIndex = vulkan_device->queue_family_graphics_compute();
+-      if (dfn.vkCreateCommandPool(device, &command_pool_create_info, nullptr,
+-                                  &command_buffer.pool) != VK_SUCCESS) {
+-        REXGPU_ERROR("Failed to create a Vulkan command pool");
+-        return false;
+-      }
+-      VkCommandBufferAllocateInfo command_buffer_allocate_info;
+-      command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+-      command_buffer_allocate_info.pNext = nullptr;
+-      command_buffer_allocate_info.commandPool = command_buffer.pool;
+-      command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+-      command_buffer_allocate_info.commandBufferCount = 1;
+-      if (dfn.vkAllocateCommandBuffers(device, &command_buffer_allocate_info,
+-                                       &command_buffer.buffer) != VK_SUCCESS) {
+-        REXGPU_ERROR("Failed to allocate a Vulkan command buffer");
+-        dfn.vkDestroyCommandPool(device, command_buffer.pool, nullptr);
+-        return false;
+-      }
+-      command_buffers_writable_.push_back(command_buffer);
++    if (!async_in_submission_ && !EnsureCommandBufferWritable()) {
++      return false;
+     }
+   }
+ 
+@@ -6102,86 +6143,117 @@
+ 
+     SubmitBarriers(true);
+ 
+-    assert_false(command_buffers_writable_.empty());
+-    CommandBuffer command_buffer = command_buffers_writable_.back();
+-    if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
+-      REXGPU_ERROR("Failed to reset a Vulkan command pool");
+-      return false;
+-    }
+-    VkCommandBufferBeginInfo command_buffer_begin_info;
+-    command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+-    command_buffer_begin_info.pNext = nullptr;
+-    command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+-    command_buffer_begin_info.pInheritanceInfo = nullptr;
+-    if (dfn.vkBeginCommandBuffer(command_buffer.buffer, &command_buffer_begin_info) != VK_SUCCESS) {
+-      REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+-      return false;
+-    }
++    if (async_submit_enabled_) {
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+-    RcompGpuMark(7);
+-    RcompGpuProfileEnd(GetCurrentSubmission());
++      RcompGpuMark(7);
++      RcompGpuProfileEnd(GetCurrentSubmission());
+ #endif
+-    deferred_command_buffer_.Execute(command_buffer.buffer);
+-    if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+-      REXGPU_ERROR("Failed to end a Vulkan command buffer");
+-      return false;
+-    }
+-
+-    VkSubmitInfo submit_info;
+-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+-    submit_info.pNext = nullptr;
+-    if (!current_submission_wait_semaphores_.empty()) {
+-      submit_info.waitSemaphoreCount = uint32_t(current_submission_wait_semaphores_.size());
+-      submit_info.pWaitSemaphores = current_submission_wait_semaphores_.data();
+-      submit_info.pWaitDstStageMask = current_submission_wait_stage_masks_.data();
++      assert_false(fences_free_.empty());
++      VkFence fence = fences_free_.back();
++      if (dfn.vkResetFences(device, 1, &fence) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to reset a Vulkan submission fence");
++        return false;
++      }
++      const uint64_t submission_current = GetCurrentSubmission();
++      for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
++        submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
++      }
++      // Takes the wait semaphores and their stage masks.
++      HandOffChunk(true, fence);
++      command_buffers_submitted_.emplace_back(submission_current, async_command_buffer_);
++      // Increments the current submission number, going to the next submission.
++      submissions_in_flight_fences_.push_back(fence);
++      fences_free_.pop_back();
++      submission_open_ = false;
+     } else {
+-      submit_info.waitSemaphoreCount = 0;
+-      submit_info.pWaitSemaphores = nullptr;
+-      submit_info.pWaitDstStageMask = nullptr;
+-    }
+-    submit_info.commandBufferCount = 1;
+-    submit_info.pCommandBuffers = &command_buffer.buffer;
+-    submit_info.signalSemaphoreCount = 0;
+-    submit_info.pSignalSemaphores = nullptr;
+-    assert_false(fences_free_.empty());
+-    VkFence fence = fences_free_.back();
+-    if (dfn.vkResetFences(device, 1, &fence) != VK_SUCCESS) {
+-      REXGPU_ERROR("Failed to reset a Vulkan submission fence");
+-      return false;
+-    }
+-    VkResult submit_result;
+-    {
+-      RcompProfScope rcomp_prof_queue(26);
+-      ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+-          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
++      assert_false(command_buffers_writable_.empty());
++      CommandBuffer command_buffer = command_buffers_writable_.back();
++      if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to reset a Vulkan command pool");
++        return false;
++      }
++      VkCommandBufferBeginInfo command_buffer_begin_info;
++      command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++      command_buffer_begin_info.pNext = nullptr;
++      command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++      command_buffer_begin_info.pInheritanceInfo = nullptr;
++      if (dfn.vkBeginCommandBuffer(command_buffer.buffer, &command_buffer_begin_info) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
++        return false;
++      }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++      RcompGpuMark(7);
++      RcompGpuProfileEnd(GetCurrentSubmission());
++#endif
++      deferred_command_buffer_.Execute(command_buffer.buffer);
++      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to end a Vulkan command buffer");
++        return false;
++      }
++
++      VkSubmitInfo submit_info;
++      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++      submit_info.pNext = nullptr;
++      if (!current_submission_wait_semaphores_.empty()) {
++        submit_info.waitSemaphoreCount = uint32_t(current_submission_wait_semaphores_.size());
++        submit_info.pWaitSemaphores = current_submission_wait_semaphores_.data();
++        submit_info.pWaitDstStageMask = current_submission_wait_stage_masks_.data();
++      } else {
++        submit_info.waitSemaphoreCount = 0;
++        submit_info.pWaitSemaphores = nullptr;
++        submit_info.pWaitDstStageMask = nullptr;
++      }
++      submit_info.commandBufferCount = 1;
++      submit_info.pCommandBuffers = &command_buffer.buffer;
++      submit_info.signalSemaphoreCount = 0;
++      submit_info.pSignalSemaphores = nullptr;
++      assert_false(fences_free_.empty());
++      VkFence fence = fences_free_.back();
++      if (dfn.vkResetFences(device, 1, &fence) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to reset a Vulkan submission fence");
++        return false;
++      }
++      VkResult submit_result;
+       {
+-        RcompProfScope rcomp_prof_submit(8);
+-        submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+-      }
+-    }
+-    if (submit_result != VK_SUCCESS) {
+-      REXGPU_ERROR("Failed to submit a Vulkan command buffer");
+-      if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
+-        device_lost_ = true;
+-        if (graphics_system_) {
+-          graphics_system_->OnHostGpuLossFromAnyThread(true);
++        RcompProfScope rcomp_prof_queue(26);
++        ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
++            vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
++        {
++          RcompProfScope rcomp_prof_submit(8);
++          submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+         }
+       }
+-      return false;
+-    }
+-    uint64_t submission_current = GetCurrentSubmission();
+-    current_submission_wait_stage_masks_.clear();
+-    for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
+-      submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
+-    }
+-    current_submission_wait_semaphores_.clear();
+-    command_buffers_submitted_.emplace_back(submission_current, command_buffer);
+-    command_buffers_writable_.pop_back();
+-    // Increments the current submission number, going to the next submission.
+-    submissions_in_flight_fences_.push_back(fence);
+-    fences_free_.pop_back();
+-
+-    submission_open_ = false;
++      if (submit_result != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to submit a Vulkan command buffer");
++        if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
++          device_lost_ = true;
++          if (graphics_system_) {
++            graphics_system_->OnHostGpuLossFromAnyThread(true);
++          }
++        }
++        return false;
++      }
++      uint64_t submission_current = GetCurrentSubmission();
++      current_submission_wait_stage_masks_.clear();
++      for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
++        submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
++      }
++      current_submission_wait_semaphores_.clear();
++      command_buffers_submitted_.emplace_back(submission_current, command_buffer);
++      command_buffers_writable_.pop_back();
++      // Increments the current submission number, going to the next submission.
++      submissions_in_flight_fences_.push_back(fence);
++      fences_free_.pop_back();
++
++      submission_open_ = false;
++    }
++  }
++
++  if (is_swap && async_submit_enabled_) {
++    // The presenter submits its own commands for the swap image right after this: the work must be
++    // on the queue before.
++    RcompProfScope rcomp_prof_await(58);
++    AwaitSubmitted(GetCurrentSubmission() - 1);
+   }
+ 
+   if (is_closing_frame) {
+@@ -7520,6 +7592,165 @@
+   return true;
+ }
+ 
++void VulkanCommandProcessor::AsyncSubmitRun() {
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  for (;;) {
++    AsyncChunk chunk;
++    {
++      std::unique_lock<std::mutex> lock(async_mutex_);
++      async_wake_.wait(lock, [this] { return !async_queue_.empty() || async_stop_; });
++      if (async_queue_.empty()) {
++        return;
++      }
++      chunk = std::move(async_queue_.front());
++      async_queue_.pop_front();
++    }
++    const VkCommandBuffer command_buffer = chunk.command_buffer.buffer;
++    if (chunk.first) {
++      if (dfn.vkResetCommandPool(device, chunk.command_buffer.pool, 0) != VK_SUCCESS) {
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "xenos: failed to reset a Vulkan command pool");
++      }
++      VkCommandBufferBeginInfo begin_info;
++      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++      begin_info.pNext = nullptr;
++      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++      begin_info.pInheritanceInfo = nullptr;
++      if (dfn.vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS) {
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "xenos: failed to begin a Vulkan command buffer");
++      }
++    }
++    {
++      RcompProfScope rcomp_prof_execute(60);
++      chunk.commands->Execute(command_buffer);
++    }
++    chunk.commands->Reset();
++    {
++      std::lock_guard<std::mutex> lock(async_mutex_);
++      async_spare_.push_back(std::move(chunk.commands));
++    }
++    if (chunk.last) {
++      RcompProfScope rcomp_prof_submit(62);
++      if (dfn.vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "xenos: failed to end a Vulkan command buffer");
++      }
++      VkSubmitInfo submit_info;
++      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++      submit_info.pNext = nullptr;
++      submit_info.waitSemaphoreCount = uint32_t(chunk.wait_semaphores.size());
++      submit_info.pWaitSemaphores =
++          chunk.wait_semaphores.empty() ? nullptr : chunk.wait_semaphores.data();
++      submit_info.pWaitDstStageMask =
++          chunk.wait_stage_masks.empty() ? nullptr : chunk.wait_stage_masks.data();
++      submit_info.commandBufferCount = 1;
++      submit_info.pCommandBuffers = &command_buffer;
++      submit_info.signalSemaphoreCount = 0;
++      submit_info.pSignalSemaphores = nullptr;
++      VkResult submit_result;
++      {
++        ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
++            vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
++        submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, chunk.fence);
++      }
++      if (submit_result != VK_SUCCESS) {
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "xenos: failed to submit a Vulkan command buffer (VkResult %d)",
++                    int(submit_result));
++      }
++      {
++        std::lock_guard<std::mutex> lock(async_mutex_);
++        async_submitted_through_.store(chunk.submission, std::memory_order_release);
++      }
++      async_done_.notify_all();
++    }
++  }
++}
++
++void VulkanCommandProcessor::HandOffChunk(bool last, VkFence fence) {
++  if (!async_thread_.joinable()) {
++    async_thread_.Start([this] { AsyncSubmitRun(); });
++  }
++  std::unique_ptr<DeferredCommandBuffer> commands;
++  {
++    std::lock_guard<std::mutex> lock(async_mutex_);
++    if (!async_spare_.empty()) {
++      commands = std::move(async_spare_.back());
++      async_spare_.pop_back();
++    }
++  }
++  if (!commands) {
++    commands = std::make_unique<DeferredCommandBuffer>(*this);
++  }
++  deferred_command_buffer_.SwapStream(*commands);
++  AsyncChunk chunk;
++  chunk.commands = std::move(commands);
++  if (!async_in_submission_) {
++    // The callers made sure a writable command buffer exists (EnsureCommandBufferWritable).
++    assert_false(command_buffers_writable_.empty());
++    chunk.first = true;
++    async_command_buffer_ = command_buffers_writable_.back();
++    command_buffers_writable_.pop_back();
++    async_in_submission_ = true;
++  }
++  chunk.command_buffer = async_command_buffer_;
++  if (last) {
++    chunk.last = true;
++    chunk.fence = fence;
++    chunk.submission = GetCurrentSubmission();
++    chunk.wait_semaphores = std::move(current_submission_wait_semaphores_);
++    chunk.wait_stage_masks = std::move(current_submission_wait_stage_masks_);
++    current_submission_wait_semaphores_.clear();
++    current_submission_wait_stage_masks_.clear();
++    async_in_submission_ = false;
++  }
++  {
++    std::lock_guard<std::mutex> lock(async_mutex_);
++    async_queue_.push_back(std::move(chunk));
++  }
++  async_wake_.notify_one();
++}
++
++void VulkanCommandProcessor::AsyncChunkIfLarge() {
++  if (!async_submit_enabled_ || !submission_open_) {
++    return;
++  }
++  const size_t chunk_bytes = size_t(REXCVAR_GET(rcomp_async_chunk_kib)) << 10;
++  if (deferred_command_buffer_.SizeBytes() < chunk_bytes) {
++    return;
++  }
++  if (!async_in_submission_ && !EnsureCommandBufferWritable()) {
++    // EndSubmission reports it.
++    return;
++  }
++  HandOffChunk(false, VK_NULL_HANDLE);
++}
++
++void VulkanCommandProcessor::AwaitSubmitted(uint64_t submission) {
++  if (async_submitted_through_.load(std::memory_order_acquire) >= submission) {
++    return;
++  }
++  std::unique_lock<std::mutex> lock(async_mutex_);
++  async_done_.wait(lock, [this, submission] {
++    return async_submitted_through_.load(std::memory_order_acquire) >= submission;
++  });
++}
++
++void VulkanCommandProcessor::StopAsyncSubmitThread() {
++  if (!async_thread_.joinable()) {
++    return;
++  }
++  {
++    std::lock_guard<std::mutex> lock(async_mutex_);
++    async_stop_ = true;
++  }
++  async_wake_.notify_one();
++  async_thread_.join();
++  async_stop_ = false;
++  async_queue_.clear();
++  async_spare_.clear();
++  async_in_submission_ = false;
++}
++
+ uint8_t* VulkanCommandProcessor::RequestConstants(size_t size, size_t alignment, VkBuffer& buffer_out,
+                                                  VkDeviceSize& offset_out) {
+   // The pages are ui::GraphicsUploadBufferPool::kDefaultPageSize (2 MiB) or larger; this only

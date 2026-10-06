@@ -1,0 +1,6 @@
+console: ok procs app=4294967295 title= count=0 pids=
+deployed and verified 5 files in /data/homebrew/PPSA88360
+chmod: ps5_chmod_title: /data/homebrew/PPSA88360 fixed=8 failed=0
+launch: ok launched PPSA88360 result=0x00004018 via lncUtilApp/foreground as user 395971800 (the console reports the title running)
+end line in the log; closing PPSA88360: ok killed PPSA88360: PPSA88360 is gone (app id 16408, 1 processes killed, result 0x00000000)
+VERDICT PASS: title status=0; logs in D:\emu 4\ps5-logs-exp\run_title\PPSA88360-20260925T224027Z

@@ -1,0 +1,242 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -71,6 +71,78 @@
+ REXCVAR_DEFINE_INT32(rcomp_readback_resolve_max_bytes, 0, "GPU/Vulkan",
+                      "With readback_resolve: read back only the resolves that write at most this many bytes (0 = every resolve)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp: the SDK's read-back of a resolution-scaled resolve (resolve_downscale_cs) binds the whole scaled resolve buffer (512 MiB times the scale area, 4.5 GiB at 3x),
++// beyond maxStorageBufferRange, and assumes that the scale_x * scale_y host pixels of a guest pixel are consecutive. The resolve shaders store each 16 bytes of guest data
++// (a group of 16 / bpp guest pixels) as scale_x * scale_y consecutive 16-byte blocks, block (rx, ry) = rx * scale_y + ry holding host pixels rx * n .. rx * n + n - 1 of host
++// row ry (see the fused resolve shaders of render_target_cache.cpp, verified bit-identical to the SDK's copies). With this on (the default), the read-back binds only the
++// range it reads and picks, for each guest pixel, the host pixel at the top left (or the center with readback_resolve_half_pixel_offset) of its footprint.
++REXCVAR_DEFINE_BOOL(rcomp_readback_downscale, true, "GPU/Vulkan",
++                    "Read back resolution-scaled resolves with R-comp's downscale (bounded binding, the resolve shaders' scaled layout)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++namespace {
++// Set when the R-comp downscale pipeline replaced the SDK's (one command processor per title).
++bool rcomp_readback_downscale_fixed = false;
++// Push constants: the SDK's ResolveDownscaleConstants, tile_count carrying the number of 32-bit words to write.
++const char kRcompReadbackDownscaleGlsl[] = R"GLSL(#version 450
++layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
++layout(push_constant) uniform Constants {
++  uint scale_x;
++  uint scale_y;
++  uint pixel_size_log2;
++  uint word_count;
++  uint source_offset_bytes;
++  uint half_pixel_offset;
++} pc;
++layout(std430, set = 0, binding = 0) readonly buffer SourceBuffer { uint data[]; } source_buffer;
++layout(std430, set = 0, binding = 1) writeonly buffer DestBuffer { uint data[]; } dest_buffer;
++
++// Byte of the bound scaled range holding the chosen host pixel of guest pixel k of the 16-byte group at unscaled offset group_byte (n guest pixels per group).
++uint SourceByte(uint group_byte, uint k, uint n, uint offset_x, uint offset_y) {
++  uint x = k * pc.scale_x + offset_x;
++  uint rx = x / n;
++  uint j = x - rx * n;
++  return pc.source_offset_bytes + group_byte * (pc.scale_x * pc.scale_y) +
++         (((rx * pc.scale_y + offset_y) * n + j) << pc.pixel_size_log2);
++}
++
++void main() {
++  uint d = gl_GlobalInvocationID.x;
++  if (d >= pc.word_count) {
++    return;
++  }
++  uint o = d << 2u;
++  uint group_byte = o & ~15u;
++  uint n = 16u >> pc.pixel_size_log2;
++  uint offset_x = 0u;
++  uint offset_y = 0u;
++  if (pc.half_pixel_offset != 0u) {
++    offset_x = pc.scale_x >> 1u;
++    offset_y = pc.scale_y >> 1u;
++  }
++  uint word = 0u;
++  if (pc.pixel_size_log2 >= 3u) {
++    // 64 bits: this word is one half of guest pixel k.
++    uint b = SourceByte(group_byte, (o & 15u) >> 3u, n, offset_x, offset_y) + (o & 4u);
++    word = source_buffer.data[b >> 2u];
++  } else if (pc.pixel_size_log2 == 2u) {
++    uint b = SourceByte(group_byte, (o & 15u) >> 2u, n, offset_x, offset_y);
++    word = source_buffer.data[b >> 2u];
++  } else {
++    // 8 or 16 bits: the word holds 4 or 2 guest pixels, each taken from its own host pixel.
++    uint bits = 8u << pc.pixel_size_log2;
++    uint pixels = 4u >> pc.pixel_size_log2;
++    uint first = (o & 15u) >> pc.pixel_size_log2;
++    uint mask = (1u << bits) - 1u;
++    for (uint i = 0u; i < pixels; ++i) {
++      uint b = SourceByte(group_byte, first + i, n, offset_x, offset_y);
++      word |= ((source_buffer.data[b >> 2u] >> ((b & 3u) * 8u)) & mask) << (i * bits);
++    }
++  }
++  dest_buffer.data[d] = word;
++}
++)GLSL";
++}  // namespace
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+                     "When async shader compilation is enabled, skip presenting frames that "
+@@ -1994,9 +2066,27 @@
+   resolve_downscale_layout_create_info.pPushConstantRanges = &resolve_downscale_push_constant_range;
+   if (dfn.vkCreatePipelineLayout(device, &resolve_downscale_layout_create_info, nullptr,
+                                  &resolve_downscale_pipeline_layout_) == VK_SUCCESS) {
+-    resolve_downscale_pipeline_ = ui::vulkan::util::CreateComputePipeline(
+-        vulkan_device, resolve_downscale_pipeline_layout_, shaders::resolve_downscale_cs,
+-        sizeof(shaders::resolve_downscale_cs));
++    rcomp_readback_downscale_fixed = false;
++    if (REXCVAR_GET(rcomp_readback_downscale)) {
++      // R-comp: the downscale of the scaled resolve layout (see kRcompReadbackDownscaleGlsl), same layout and push constants.
++      std::vector<uint32_t> downscale_spirv;
++      std::string downscale_error;
++      if (CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, kRcompReadbackDownscaleGlsl, downscale_spirv,
++                             downscale_error)) {
++        resolve_downscale_pipeline_ = ui::vulkan::util::CreateComputePipeline(
++            vulkan_device, resolve_downscale_pipeline_layout_, downscale_spirv.data(),
++            sizeof(uint32_t) * downscale_spirv.size());
++        rcomp_readback_downscale_fixed = resolve_downscale_pipeline_ != VK_NULL_HANDLE;
++      } else {
++        REXGPU_ERROR("Failed to compile the R-comp resolve read-back downscale shader: {}", downscale_error);
++      }
++      std::fprintf(stderr, "RCOMP-READBACK-DOWNSCALE rcomp_shader=%u\n", unsigned(rcomp_readback_downscale_fixed));
++    }
++    if (resolve_downscale_pipeline_ == VK_NULL_HANDLE) {
++      resolve_downscale_pipeline_ = ui::vulkan::util::CreateComputePipeline(
++          vulkan_device, resolve_downscale_pipeline_layout_, shaders::resolve_downscale_cs,
++          sizeof(shaders::resolve_downscale_cs));
++    }
+     if (resolve_downscale_pipeline_ == VK_NULL_HANDLE) {
+       REXGPU_WARN("Failed to create Vulkan resolve-downscale readback pipeline");
+       ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+@@ -5342,17 +5432,19 @@
+     return true;
+   }
+   ++rcomp_readbacks;
+-  const bool rcomp_readback_logged = rcomp_readbacks <= 32 || (rcomp_readbacks & 0xFFF) == 0;
++  // The first 32 read-backs, then every 64th (with their data statistics, see RCOMP-READBACK-DATA).
++  const bool rcomp_readback_logged = rcomp_readbacks <= 32 || (rcomp_readbacks & 63) == 0;
++  const auto rcomp_log_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+   if (rcomp_readback_logged) {
+-    const auto log_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+     const auto log_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+     std::fprintf(stderr,
+-                 "RCOMP-READBACK n=%llu skipped=%llu frame=%llu address=0x%08X length=0x%X fmt=%u pitch=%u height=%u scaled=%u mode=%u\n",
++                 "RCOMP-READBACK n=%llu skipped=%llu frame=%llu address=0x%08X length=0x%X fmt=%u pitch=%u height=%u endian=%u scaled=%u mode=%u downscale=%u\n",
+                  (unsigned long long)rcomp_readbacks, (unsigned long long)rcomp_readbacks_skipped,
+                  (unsigned long long)frame_current_, written_address, written_length,
+-                 unsigned(log_dest_info.copy_dest_format), unsigned(log_dest_pitch.copy_dest_pitch),
+-                 unsigned(log_dest_pitch.copy_dest_height), unsigned(texture_cache_->IsDrawResolutionScaled()),
+-                 unsigned(readback_mode));
++                 unsigned(rcomp_log_dest_info.copy_dest_format), unsigned(log_dest_pitch.copy_dest_pitch),
++                 unsigned(log_dest_pitch.copy_dest_height), unsigned(rcomp_log_dest_info.copy_dest_endian),
++                 unsigned(texture_cache_->IsDrawResolutionScaled()), unsigned(readback_mode),
++                 unsigned(rcomp_readback_downscale_fixed));
+   }
+ 
+   auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
+@@ -5494,6 +5586,20 @@
+     buffer_infos[0].buffer = scaled_resolve_buffer;
+     buffer_infos[0].offset = 0;
+     buffer_infos[0].range = VK_WHOLE_SIZE;
++    uint32_t rcomp_source_offset_bytes = uint32_t(scaled_start);
++    if (rcomp_readback_downscale_fixed) {
++      // Bind only the scaled range that is read, from an offset aligned for storage buffers.
++      const VkDeviceSize alignment =
++          std::max<VkDeviceSize>(vulkan_device->properties().minStorageBufferOffsetAlignment, 4);
++      const VkDeviceSize bound_start = VkDeviceSize(scaled_start) - VkDeviceSize(scaled_start) % alignment;
++      const VkDeviceSize bound_length = VkDeviceSize(scaled_start) - bound_start + scaled_length;
++      if (bound_length > vulkan_device->properties().maxStorageBufferRange) {
++        return true;
++      }
++      buffer_infos[0].offset = bound_start;
++      buffer_infos[0].range = bound_length;
++      rcomp_source_offset_bytes = uint32_t(VkDeviceSize(scaled_start) - bound_start);
++    }
+     buffer_infos[1].buffer = resolve_downscale_buffer_;
+     buffer_infos[1].offset = 0;
+     buffer_infos[1].range = written_length;
+@@ -5531,8 +5637,9 @@
+     constants.scale_x = texture_cache_->draw_resolution_scale_x();
+     constants.scale_y = texture_cache_->draw_resolution_scale_y();
+     constants.pixel_size_log2 = pixel_size_log2;
+-    constants.tile_count = tile_count;
+-    constants.source_offset_bytes = uint32_t(scaled_start);
++    // R-comp downscale: tile_count carries the number of 32-bit words (one invocation each, 64 per group).
++    constants.tile_count = rcomp_readback_downscale_fixed ? (written_length >> 2) : tile_count;
++    constants.source_offset_bytes = rcomp_source_offset_bytes;
+     constants.half_pixel_offset = (REXCVAR_GET(readback_resolve_half_pixel_offset) &&
+                                    (constants.scale_x > 1 || constants.scale_y > 1))
+                                       ? 1u
+@@ -5543,7 +5650,8 @@
+     deferred_command_buffer_.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                                      resolve_downscale_pipeline_layout_, 0, 1,
+                                                      &descriptor_set, 0, nullptr);
+-    deferred_command_buffer_.CmdVkDispatch(tile_count, 1, 1);
++    deferred_command_buffer_.CmdVkDispatch(
++        rcomp_readback_downscale_fixed ? ((written_length >> 2) + 63) / 64 : tile_count, 1, 1);
+ 
+     VkBufferMemoryBarrier downscale_barrier = {};
+     downscale_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+@@ -5615,13 +5723,56 @@
+       std::memcpy(destination, readback.mapped_data[read_index], written_length);
+       memory_->NoteCpWrite(written_address, written_length);
+       if (rcomp_readback_logged) {
+-        // The first 32 bytes as stored in guest memory (guest byte order), the delayed slot or not.
++        // The first 32 bytes of guest memory (each word loaded in host order, so a big-endian guest half 0x3C00 reads as 003C), the slot, and statistics of the whole
++        // written range: nonzero 32-bit words; for 16-bit float destinations (k_16_FLOAT, k_16_16_FLOAT, k_16_16_16_16_FLOAT) the halves as the guest CPU reads them
++        // (big-endian): finite nonzero count, minimum, maximum, infinities/NaNs, and the maximum of the other byte order (an endianness cross-check).
+         uint32_t words[8] = {};
+         std::memcpy(words, destination, std::min<uint32_t>(written_length, uint32_t(sizeof(words))));
++        uint32_t nonzero_words = 0;
++        for (uint32_t i = 0; i + 4 <= written_length; i += 4) {
++          uint32_t w;
++          std::memcpy(&w, destination + i, 4);
++          nonzero_words += w != 0;
++        }
+         std::fprintf(stderr,
+-                     "RCOMP-READBACK-DATA n=%llu slot=%u miss=%u words=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+-                     (unsigned long long)rcomp_readbacks, read_index, unsigned(is_cache_miss), words[0], words[1],
+-                     words[2], words[3], words[4], words[5], words[6], words[7]);
++                     "RCOMP-READBACK-DATA n=%llu slot=%u miss=%u nonzero_words=%u/%u words=%08X %08X %08X %08X %08X %08X %08X %08X\n",
++                     (unsigned long long)rcomp_readbacks, read_index, unsigned(is_cache_miss), nonzero_words,
++                     written_length >> 2, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
++        const uint32_t log_format = uint32_t(rcomp_log_dest_info.copy_dest_format);
++        if (log_format == uint32_t(xenos::ColorFormat::k_16_FLOAT) ||
++            log_format == uint32_t(xenos::ColorFormat::k_16_16_FLOAT) ||
++            log_format == uint32_t(xenos::ColorFormat::k_16_16_16_16_FLOAT)) {
++          auto half_to_float = [](uint32_t h) -> float {
++            const uint32_t sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
++            float value = exponent ? std::ldexp(float(mantissa | 1024), int(exponent) - 25)
++                                   : std::ldexp(float(mantissa), -24);
++            return sign ? -value : value;
++          };
++          uint32_t finite_nonzero = 0, special = 0;
++          float minimum = 0.0f, maximum = 0.0f, other_order_maximum = 0.0f;
++          for (uint32_t i = 0; i + 2 <= written_length; i += 2) {
++            const uint32_t big = (uint32_t(destination[i]) << 8) | destination[i + 1];
++            const uint32_t little = (uint32_t(destination[i + 1]) << 8) | destination[i];
++            if (((little >> 10) & 31) != 31) {
++              other_order_maximum = std::max(other_order_maximum, half_to_float(little));
++            }
++            if (((big >> 10) & 31) == 31) {
++              ++special;
++              continue;
++            }
++            if (!(big & 0x7FFF)) {
++              continue;
++            }
++            const float value = half_to_float(big);
++            minimum = finite_nonzero ? std::min(minimum, value) : value;
++            maximum = finite_nonzero ? std::max(maximum, value) : value;
++            ++finite_nonzero;
++          }
++          std::fprintf(stderr,
++                       "RCOMP-READBACK-HALF n=%llu finite_nonzero=%u/%u min=%g max=%g inf_nan=%u other_order_max=%g\n",
++                       (unsigned long long)rcomp_readbacks, finite_nonzero, written_length >> 1, double(minimum),
++                       double(maximum), special, double(other_order_maximum));
++        }
+       }
+     }
+   }

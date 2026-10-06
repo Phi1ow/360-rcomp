@@ -1,0 +1,30 @@
+--- a/gpu/xenos/rexglue/rcomp/xenos_host.cpp
++++ b/gpu/xenos/rexglue/rcomp/xenos_host.cpp
+@@ -16,6 +16,9 @@
+ 
+ extern "C" {
+ void rcomp_profile_register_host_thread() __attribute__((weak));
++// Optional observation only: the CPU observer samples guest MFTB at entry.
++void rcomp_observe_vblank(uint32_t count, uint32_t nominal_hz,
++                          uint64_t monotonic_ns, int64_t lateness_ns) __attribute__((weak));
+ std::atomic<uint64_t> rcomp_prof[16];
+ std::atomic<uint64_t> rcomp_op_ns[128], rcomp_op_count[128], rcomp_packet_start_ns;
+ std::atomic<uint32_t> rcomp_cp_packets{0}, rcomp_cp_last_packet{0}, rcomp_cp_wait[6];  // bring-up tracing (see command_processor.cpp)
+@@ -210,9 +213,17 @@
+             cp_->UpdateWritePointer(v);
+         }
+         if (cfg_.vblank_hz && now >= next_vblank) {
++            const auto vblank_deadline = next_vblank;
+             next_vblank += period;
+             cp_->increment_counter();
+             vblanks_.fetch_add(1);
++            if (rcomp_observe_vblank) {
++                // Reuse the clock sample which decided this vblank. No new
++                // timer read, cadence adjustment or recalibration is added.
++                rcomp_observe_vblank(vblanks_.load(std::memory_order_relaxed), cfg_.vblank_hz,
++                    uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()),
++                    int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - vblank_deadline).count()));
++            }
+             DispatchInterruptCallback(0, 2);
+         }
+         struct timespec ts = {0, long(cfg_.bridge_poll_us) * 1000};

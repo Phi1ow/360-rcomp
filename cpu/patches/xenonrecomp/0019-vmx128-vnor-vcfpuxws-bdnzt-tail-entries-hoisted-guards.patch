@@ -1,0 +1,179 @@
+--- a/XenonAnalyse/main.cpp
++++ b/XenonAnalyse/main.cpp
+@@ -272,15 +272,21 @@
+                         SwitchTable table{};
+                         table.type = type;
+                         ScanTable((uint32_t*)data, base + (data - dataStart), table);
+-                        if (table.base == 0 && type == SWITCH_ABSOLUTE)
++                        if (table.base == 0)
+                         {
+-                            // Hoisted guard: the index register is the source of the rlwinm at +2.
++                            // Hoisted guard: the index register is the source of the rlwinm at +2
++                            // (absolute and 16-bit offset tables) or the index of the lbzx at +2
++                            // (computed and byte offset tables). R-comp patch 0019: the search was
++                            // only made for absolute tables; the same rules (stop at a blr or at a
++                            // write of the index register) apply to every form.
+                             ppc_insn rl;
+                             ppc::Disassemble((const uint32_t*)data + 2, base + (data - dataStart) + 8, rl);
++                            const uint32_t indexReg = (type == SWITCH_COMPUTED || type == SWITCH_BYTEOFFSET)
++                                ? uint32_t(rl.operands[2]) : uint32_t(rl.operands[1]);
+                             table = SwitchTable{};
+                             table.type = type;
+-                            ScanTable((uint32_t*)data, base + (data - dataStart), table, 1024, rl.operands[1]);
+-                            if (table.base == 0)
++                            ScanTable((uint32_t*)data, base + (data - dataStart), table, 1024, indexReg);
++                            if (table.base == 0 && type == SWITCH_ABSOLUTE)
+                             {
+                                 // No guard: the index is bounded by construction (for example set by
+                                 // li constants). A table emitted right after the bctr ends where the
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -316,6 +316,105 @@
+         }
+     }
+ 
++    // R-comp patch 0019: entry points inside a function. A `bl`, or a `b` that
++    // leaves its own function (a tail call), may target an address inside
++    // another function: a shared `blr` or epilogue, the last block of a function
++    // that several callers enter. Such a target gets a function of its own, a
++    // copy of the tail [target, end of the enclosing function), when that tail
++    // is closed: every non-call branch in it stays in it, or is an unconditional
++    // `b` to the start of a known function (a tail call), and every switch table
++    // in it only names labels in it. A tail that is not closed keeps the
++    // "Direct call ... with no recompiled function" diagnostic, which stays a
++    // failure.
++    {
++        auto functionStart = [&](size_t address)
++        {
++            auto symbol = image.symbols.find(address);
++            return symbol != image.symbols.end() && symbol->address == address && symbol->type == Symbol_Function;
++        };
++        std::vector<std::pair<size_t, size_t>> ranges;  // [base, end) of every function
++        for (const auto& fn : functions)
++            if (fn.size)
++                ranges.emplace_back(fn.base, fn.base + fn.size);
++        std::sort(ranges.begin(), ranges.end());
++        // The function with the largest base <= address that contains it.
++        auto enclosing = [&](size_t address) -> const std::pair<size_t, size_t>*
++        {
++            auto it = std::upper_bound(ranges.begin(), ranges.end(), std::make_pair(address, SIZE_MAX));
++            while (it != ranges.begin())
++            {
++                --it;
++                if (address < it->second)
++                    return &*it;
++                if (it->first + 0x100000 < address)  // functions do not reach that far back
++                    break;
++            }
++            return nullptr;
++        };
++        // A tail may end in a branch to another tail: repeat until no new one.
++        for (bool added = true; added;)
++        {
++        std::vector<std::pair<size_t, size_t>> tails;
++        for (const auto& section : image.sections)
++        {
++            if (!(section.flags & SectionFlags_Code))
++                continue;
++            for (size_t offset = 0; offset + 4 <= section.size; offset += 4)
++            {
++                const uint32_t insn = ByteSwap(*(uint32_t*)(section.data + offset));
++                if (PPC_OP(insn) != PPC_OP_B || (insn & 2))
++                    continue;
++                const size_t address = section.base + offset;
++                const size_t target = address + PPC_BI(insn);
++                if (target < section.base || target >= section.base + section.size || (target & 3) || functionStart(target))
++                    continue;
++                const auto* into = enclosing(target);
++                if (!into || into->first == target)
++                    continue;
++                if (!PPC_BL(insn))
++                {
++                    const auto* from = enclosing(address);
++                    if (from && target >= from->first && target < from->second)
++                        continue;  // a branch inside its own function
++                }
++                const size_t end = into->second;
++                if (end > section.base + section.size)
++                    continue;
++                bool closed = true;
++                for (size_t at = target; closed && at < end; at += 4)
++                {
++                    const uint32_t word = ByteSwap(*(uint32_t*)(section.data + at - section.base));
++                    const bool absolute = (word & 2) != 0;
++                    if (PPC_OP(word) == PPC_OP_B && !PPC_BL(word))
++                    {
++                        const size_t to = at + PPC_BI(word);
++                        closed = !absolute && ((to >= target && to < end) || functionStart(to));
++                    }
++                    else if (PPC_OP(word) == PPC_OP_BC && !PPC_BL(word))
++                    {
++                        const size_t to = at + PPC_BD(word);
++                        closed = !absolute && to >= target && to < end;
++                    }
++                    auto table = config.switchTables.find(at);
++                    if (closed && table != config.switchTables.end())
++                        for (auto label : table->second.labels)
++                            closed = closed && label >= target && label < end;
++                }
++                if (closed)
++                    tails.emplace_back(target, end - target);
++            }
++        }
++        std::sort(tails.begin(), tails.end());
++        tails.erase(std::unique(tails.begin(), tails.end()), tails.end());
++        added = !tails.empty();
++        for (const auto& [address, size] : tails)
++        {
++            functions.emplace_back(address, size);
++            image.symbols.emplace(fmt::format("sub_{:X}", address), address, size, Symbol_Function);
++        }
++        }
++    }
++
+     std::sort(functions.begin(), functions.end(), [](auto& lhs, auto& rhs) { return lhs.base < rhs.base; });
+     return true;
+ }
+@@ -740,10 +839,18 @@
+         break;
+ 
+     case PPC_INST_BDNZF:
+-        // NOTE: assuming eq here as a shortcut because all the instructions in the game do that
++    case PPC_INST_BDNZT:
++    {
++        // R-comp patch 0019: decrement CTR, branch if CTR != 0 and CR bit BI is
++        // false (bdnzf) / true (bdnzt). Upstream tested the eq bit of the field
++        // whatever BI named ("all the instructions in the game do that").
++        static constexpr const char* kCrBits[] = { "lt", "gt", "eq", "so" };
++        const bool branchIfTrue = insn.opcode->id == PPC_INST_BDNZT;
+         println("\t--{}.u64;", ctr());
+-        println("\tif ({}.u32 != 0 && !{}.eq) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), insn.operands[1]);
++        println("\tif ({}.u32 != 0 && {}{}.{}) goto loc_{:X};", ctr(), branchIfTrue ? "" : "!",
++            cr(insn.operands[0] / 4), kCrBits[insn.operands[0] % 4], insn.operands[1]);
+         break;
++    }
+ 
+     case PPC_INST_BEQ:
+         printConditionalBranch(false, "eq");
+@@ -2086,6 +2193,13 @@
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_xor_ps(simde_mm_sub_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)), simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]), v(insn.operands[3]));
+         break;
+ 
++    case PPC_INST_VNOR:
++    case PPC_INST_VNOR128:
++        // R-comp patch 0019: vD = ~(vA | vB) (vnot when vA == vB).
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_xor_si128(simde_mm_or_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_set1_epi32(-1)));",
++            v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VOR:
+     case PPC_INST_VOR128:
+         print("\tsimde_mm_store_si128((simde__m128i*){}.u8, ", v(insn.operands[0]));
+@@ -2434,6 +2548,7 @@
+         break;
+     }
+     case PPC_INST_VCTUXS:
++    case PPC_INST_VCFPUXWS128:  // R-comp patch 0019: the VMX128 form, same operands (vD, vB, UIMM)
+         // Float -> uint32 with round toward zero and saturation; NaN -> 0.
+         // VSCR[SAT] is not modelled (no VSCR in PPCContext).
+         printSetFlushMode(true);

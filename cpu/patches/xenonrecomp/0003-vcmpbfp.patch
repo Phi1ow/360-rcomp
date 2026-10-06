@@ -1,0 +1,26 @@
+diff -ruN c/XenonRecomp/recompiler.cpp d/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 15:24:47.861926505 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 15:26:14.945462039 +0000
+@@ -1817,7 +1817,21 @@
+ 
+     case PPC_INST_VCMPBFP:
+     case PPC_INST_VCMPBFP128:
+-        println("\t__builtin_debugtrap();");
++        // R-comp patch 0003. Bounds compare (Power ISA vcmpbfp): per element,
++        // bit 0 (MSB) = !(a <= b), bit 1 = !(a >= -b); NaN sets both. The
++        // record form sets CR6[2] when every element is in bounds.
++        printSetFlushMode(true);
++        for (size_t i = 0; i < 4; i++)
++            println("\t{}.u32[{}] = ({}.f32[{}] <= {}.f32[{}] ? 0u : 0x80000000u) | ({}.f32[{}] >= -{}.f32[{}] ? 0u : 0x40000000u);",
++                vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        if (strchr(insn.opcode->name, '.'))
++        {
++            println("\t{}.lt = 0;", cr(6));
++            println("\t{}.gt = 0;", cr(6));
++            println("\t{}.eq = ({}.u32[0] | {}.u32[1] | {}.u32[2] | {}.u32[3]) == 0;", cr(6), v(insn.operands[0]), v(insn.operands[0]), v(insn.operands[0]), v(insn.operands[0]));
++            println("\t{}.so = 0;", cr(6));
++        }
+         break;
+ 
+     case PPC_INST_VCMPEQFP:

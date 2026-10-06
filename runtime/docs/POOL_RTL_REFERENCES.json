@@ -1,0 +1,25 @@
+{
+  "retrieved_utc_date": "2026-09-28",
+  "kind": "public ABI research only; no reference runtime linked or copied",
+  "xenia_canary_commit": "c332733afd14ed3aeb08b38d0cabffa58d1c8c2f",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/xenia-canary/xenia-canary/c332733afd14ed3aeb08b38d0cabffa58d1c8c2f/src/xenia/kernel/xboxkrnl/xboxkrnl_rtl.cc",
+      "sha256": "933c127e7866c889c318d4208fe68b36569a83b322000c9488f3f00a6b31b590",
+      "license": "BSD-3-Clause; consulted for behavior, not copied"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/xenia-canary/xenia-canary/c332733afd14ed3aeb08b38d0cabffa58d1c8c2f/src/xenia/kernel/xboxkrnl/xboxkrnl_memory.cc",
+      "sha256": "df028df0cd033b455b7702888de5557a6930ea79d729901f02d9901bd6257824",
+      "license": "BSD-3-Clause; consulted for ABI, not copied"
+    }
+  ],
+  "windows_oracle": {
+    "platform_version": "10.0.26200",
+    "scope": "NT only; not Xbox hardware",
+    "ansi_65536_bytes": [65534, 65535],
+    "unicode_65536_bytes": [65532, 65534],
+    "four_matching_ulongs_bytes": 16,
+    "second_ulong_mismatch_bytes": 4
+  }
+}

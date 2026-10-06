@@ -1,0 +1,20 @@
+--- a/gpu/xenos/rexglue/CMakeLists.txt
++++ b/gpu/xenos/rexglue/CMakeLists.txt
+@@ -16,6 +16,7 @@
+ option(RCOMP_XENOS_VULKAN "Build the Vulkan rendering backend" ON)
+ option(RCOMP_XENOS_DIAGNOSTICS "Enable Xenos bring-up logs and packet inspection" OFF)
+ option(RCOMP_XENOS_PROFILE_TIMINGS "Time Xenos packets, draws, interrupts and submissions" OFF)
++option(RCOMP_XENOS_RENDER_DIAGNOSTICS "Compile bounded Xenos render-state diagnostics" OFF)
+ 
+ # glslang's SPIR-V builder only (no GLSL front end).
+ add_library(rcomp_glslang_spirv STATIC
+@@ -50,7 +51,8 @@
+ target_compile_definitions(rcomp_rex_base PUBLIC SPDLOG_FMT_EXTERNAL FMT_HEADER_ONLY
+   SPDLOG_NO_TLS SPDLOG_NO_THREAD_ID FMT_USE_LOCALE=0 RCOMP_XENOS_NO_WINDOW_SYSTEM
+   RCOMP_XENOS_DIAGNOSTICS=$<BOOL:${RCOMP_XENOS_DIAGNOSTICS}>
+-  RCOMP_XENOS_PROFILE_TIMINGS=$<BOOL:${RCOMP_XENOS_PROFILE_TIMINGS}>)
++  RCOMP_XENOS_PROFILE_TIMINGS=$<BOOL:${RCOMP_XENOS_PROFILE_TIMINGS}>
++  RCOMP_XENOS_RENDER_DIAGNOSTICS=$<BOOL:${RCOMP_XENOS_RENDER_DIAGNOSTICS}>)
+ if(RCOMP_XENOS_VULKAN)
+   # Declares/defines the Vulkan backend's settings (rex/graphics/flags.h,
+   # rex/ui/flags.h) in every library, so all agree on them.

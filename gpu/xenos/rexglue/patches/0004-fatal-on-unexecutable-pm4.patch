@@ -1,0 +1,63 @@
+diff -ruN a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp	2026-09-26 06:44:20.242900296 +0000
++++ b/src/graphics/command_processor.cpp	2026-09-26 06:44:14.553219490 +0000
+@@ -32,6 +32,8 @@
+ #include <rex/memory/ring_buffer.h>
+ #include <rex/stream.h>
+ 
++#include <rcomp/diag.h>  // R-comp patch 0004
++
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ 
+ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+@@ -603,8 +605,9 @@
+     if (!ExecutePacket(&reader)) {
+       // This probably should be fatal - but we're going to continue anyways.
+       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
+-      assert_always();
+-      break;
++      // R-comp patch 0004: a packet that cannot be executed stops the title
++      // (upstream logged and carried on with the rest of the stream).
++      rcomp_fatal(RCOMP_FATAL_UNIMPLEMENTED, "xenos: %s: failed to execute a PM4 packet", "PRIMARY RINGBUFFER");
+     }
+   } while (reader.read_count());
+ 
+@@ -623,8 +626,9 @@
+     if (!ExecutePacket(&reader)) {
+       // Return up a level if we encounter a bad packet.
+       REXGPU_ERROR("**** INDIRECT RINGBUFFER: Failed to execute packet.");
+-      assert_always();
+-      break;
++      // R-comp patch 0004: a packet that cannot be executed stops the title
++      // (upstream logged and carried on with the rest of the stream).
++      rcomp_fatal(RCOMP_FATAL_UNIMPLEMENTED, "xenos: %s: failed to execute a PM4 packet", "INDIRECT RINGBUFFER");
+     }
+   } while (reader.read_count());
+ }
+@@ -636,8 +640,9 @@
+   do {
+     if (!ExecutePacket(&reader)) {
+       REXGPU_ERROR("**** ExecutePacket: Failed to execute packet.");
+-      assert_always();
+-      break;
++      // R-comp patch 0004: a packet that cannot be executed stops the title
++      // (upstream logged and carried on with the rest of the stream).
++      rcomp_fatal(RCOMP_FATAL_UNIMPLEMENTED, "xenos: %s: failed to execute a PM4 packet", "ExecutePacket");
+     }
+   } while (reader.read_count());
+ }
+@@ -860,10 +865,10 @@
+     }
+ 
+     default:
+-      REXGPU_INFO("Unimplemented GPU OPCODE: 0x{:02X}\t\tCOUNT: {}\n", opcode, count);
+-      assert_always();
+-      reader->AdvanceRead(count * sizeof(uint32_t));
+-      break;
++      // R-comp patch 0004: an unknown type-3 opcode is fatal (upstream logged
++      // it and skipped the packet).
++      rcomp_fatal(RCOMP_FATAL_UNIMPLEMENTED, "xenos: unimplemented PM4 type-3 opcode 0x%02X (count %u)", opcode,
++                  count);
+   }
+ 
+   assert_true(reader->read_offset() ==

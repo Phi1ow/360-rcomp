@@ -1,0 +1,60 @@
+RCOMP-TITLE begin title=PPSA88360 build=38d8473ebfa9282d pid=126 argc=1 argv0=
+RCOMP-TITLE log path=/app0/rcomp_title.log
+RCOMP-TITLE mem start flexible_available=462422016 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+rcomp platform selftest: backend=ps5 fork=0 page=16384
+PASS reserve_release
+PASS commit_bounds
+PASS write_read
+PASS decommit_zeroes
+PASS protect_read_faults
+PASS access_permissions_and_transitions
+PASS runtime_range_permissions
+PASS uncommitted_and_guard_fault
+PASS runtime_range_conflict
+PASS stats_accounting
+PASS repeat_reserve_release_x20
+INFO alloc_failure_many_reservations: 4 concurrent 4 GiB reservations succeeded, next = OutOfMemory
+PASS alloc_failure_many_reservations
+PASS ps5_backend_runs_and_unwind
+SUMMARY pass=13 fail=0 skip=0
+RCOMP-TITLE platform status=0
+RCOMP-TITLE xex begin path=/app0/fixtures/xex/rcomp_title.xex
+{"id":"xex/calendar_threads/watchdog_started","status":"PASS","scope":"PS5","reason":""}
+{"id":"xex/calendar_threads/packaged_xex_read","status":"PASS","scope":"PS5","reason":"/app0/fixtures/xex/rcomp_title.xex"}
+RCOMP-APP stage=image_loaded entry=0x82001000 variables=0 unresolved=0
+{"id":"xex/calendar_threads/title_create","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=0 run=0 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=0 run=1 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+{"id":"xex/calendar_threads/destroy_clears_runtime_memory_imports_functions","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=image_loaded entry=0x82001000 variables=0 unresolved=0
+{"id":"xex/calendar_threads/title_create","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=1 run=0 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=1 run=1 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+{"id":"xex/calendar_threads/destroy_clears_runtime_memory_imports_functions","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=image_loaded entry=0x82001000 variables=0 unresolved=0
+{"id":"xex/calendar_threads/title_create","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=2 run=0 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+RCOMP-APP stage=entry_begin pc=0x82001000
+RCOMP-APP stage=entry_returned code=0x00000070
+{"id":"xex/calendar_threads/ppc_calendar_and_resume","status":"PASS","scope":"PS5","reason":"cycle=2 run=1 exit=0x00000070 expected=0x00000070 45_original_ppc_checks_completed"}
+{"id":"xex/calendar_threads/ppc_releases_transient_allocations","status":"PASS","scope":"PS5","reason":""}
+{"id":"xex/calendar_threads/destroy_clears_runtime_memory_imports_functions","status":"PASS","scope":"PS5","reason":""}
+RCOMP-CALENDAR-THREADS checks=20 pass=20 fail=0 scope=PS5 graphics=NOT_TESTED
+RCOMP-TITLE xex status=0
+RCOMP-TITLE mem end flexible_available=420478976 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+RCOMP-TITLE end status=0

@@ -1,0 +1,150 @@
+diff -ruN b0/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 15:22:31.194543250 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 15:24:47.861926505 +0000
+@@ -1133,6 +1133,8 @@
+         println("\t{}.s64 = {};", r(insn.operands[0]), int32_t(insn.operands[1] << 16));
+         break;
+ 
++    case PPC_INST_LVEBX:
++    case PPC_INST_LVEHX:
+     case PPC_INST_LVEWX:
+     case PPC_INST_LVEWX128:
+     case PPC_INST_LVX:
+@@ -1752,6 +1754,7 @@
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VANDC:
+     case PPC_INST_VANDC128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+         break;
+@@ -2246,6 +2249,129 @@
+         println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
+         break;
+ 
++    // ---- R-comp patch 0002: VMX instructions missing upstream. Vectors are
++    // stored byte-reversed on the host (see the lvx note), so host element i
++    // of a lane width is guest element (N-1-i); lane-wise ops are unaffected
++    // and packs take the second source operand as the host low half, like
++    // the existing vpkshus.
++    case PPC_INST_VAVGUH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_avg_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VMAXSH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_max_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VMAXUH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_max_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VMINSH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_min_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VMINUH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_min_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VSUBSHS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_subs_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++    case PPC_INST_VSPLTISH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_set1_epi16(int16_t(int32_t(0x{:X}))));", v(insn.operands[0]), insn.operands[1]);
++        break;
++    case PPC_INST_VRLH:
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.u16[{}] = uint16_t(({}.u16[{}] << ({}.u16[{}] & 0xF)) | ({}.u16[{}] >> ((16 - ({}.u16[{}] & 0xF)) & 0xF)));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VSLH:
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.u16[{}] = uint16_t({}.u16[{}] << ({}.u16[{}] & 0xF));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VSRH:
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.u16[{}] = uint16_t({}.u16[{}] >> ({}.u16[{}] & 0xF));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VSRAH:
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.s16[{}] = int16_t({}.s16[{}] >> ({}.u16[{}] & 0xF));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VPKSHSS:
++    case PPC_INST_VPKSHSS128:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s8, simde_mm_packs_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKSWSS:
++    case PPC_INST_VPKSWSS128:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_packs_epi32(simde_mm_load_si128((simde__m128i*){}.s32), simde_mm_load_si128((simde__m128i*){}.s32)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKSWUS:
++    case PPC_INST_VPKSWUS128:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_packus_epi32(simde_mm_load_si128((simde__m128i*){}.s32), simde_mm_load_si128((simde__m128i*){}.s32)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKUHUM:
++    case PPC_INST_VPKUHUM128:
++        for (size_t i = 0; i < 8; i++)
++        {
++            println("\t{}.u8[{}] = uint8_t({}.u16[{}]);", vTemp(), i, v(insn.operands[2]), i);
++            println("\t{}.u8[{}] = uint8_t({}.u16[{}]);", vTemp(), i + 8, v(insn.operands[1]), i);
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VPKUWUM:
++    case PPC_INST_VPKUWUM128:
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{}.u16[{}] = uint16_t({}.u32[{}]);", vTemp(), i, v(insn.operands[2]), i);
++            println("\t{}.u16[{}] = uint16_t({}.u32[{}]);", vTemp(), i + 4, v(insn.operands[1]), i);
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VPKUHUS:
++    case PPC_INST_VPKUHUS128:
++        for (size_t i = 0; i < 8; i++)
++        {
++            println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : uint8_t({}.u16[{}]);", vTemp(), i, v(insn.operands[2]), i, v(insn.operands[2]), i);
++            println("\t{}.u8[{}] = {}.u16[{}] > 0xFF ? 0xFF : uint8_t({}.u16[{}]);", vTemp(), i + 8, v(insn.operands[1]), i, v(insn.operands[1]), i);
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VPKUWUS:
++    case PPC_INST_VPKUWUS128:
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : uint16_t({}.u32[{}]);", vTemp(), i, v(insn.operands[2]), i, v(insn.operands[2]), i);
++            println("\t{}.u16[{}] = {}.u32[{}] > 0xFFFF ? 0xFFFF : uint16_t({}.u32[{}]);", vTemp(), i + 4, v(insn.operands[1]), i, v(insn.operands[1]), i);
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    case PPC_INST_VSL:
++    case PPC_INST_VSLO:
++    case PPC_INST_VSRO:
++    {
++        // The host byte order makes the register a little-endian 128-bit
++        // integer equal to the guest's big-endian value; the count comes
++        // from guest byte 15 (host byte 0).
++        const char* amount = insn.opcode->id == PPC_INST_VSL ? "({}.u8[0] & 0x7)" : "(({}.u8[0] >> 3) & 0xF) * 8";
++        const char* op = insn.opcode->id == PPC_INST_VSRO ? ">>" : "<<";
++        println("\t{{");
++        println("\t\tunsigned __int128 t = ((unsigned __int128){}.u64[1] << 64) | {}.u64[0];", v(insn.operands[1]), v(insn.operands[1]));
++        println("\t\tt = t {} {};", op, fmt::format(fmt::runtime(amount), v(insn.operands[2])));
++        println("\t\t{}.u64[0] = uint64_t(t);", v(insn.operands[0]));
++        println("\t\t{}.u64[1] = uint64_t(t >> 64);", v(insn.operands[0]));
++        println("\t}}");
++        break;
++    }
++    case PPC_INST_VCTUXS:
++        // Float -> uint32 with round toward zero and saturation; NaN -> 0.
++        // VSCR[SAT] is not modelled (no VSCR in PPCContext).
++        printSetFlushMode(true);
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{}.f64 = double({}.f32[{}]) * {}.0;", temp(), v(insn.operands[1]), i, 1u << insn.operands[2]);
++            println("\t{}.u32[{}] = ({}.f64 != {}.f64 || {}.f64 <= 0.0) ? 0u : ({}.f64 >= 4294967295.0 ? 0xFFFFFFFFu : uint32_t({}.f64));", vTemp(), i, temp(), temp(), temp(), temp(), temp());
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
+     // ---- R-comp patch 0001: integer carry/extended forms, eqv, mulhd[u],
+     // rlwnm, and the tw/twi/td/tdi trap family. CA follows this file's
+     // existing 32-bit convention (addic/adde/addze/subfe); record forms use

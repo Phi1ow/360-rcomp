@@ -1,0 +1,149 @@
+// R-comp: resolution-scaled texture load written directly to the host image.
+//
+// Same data and addressing as rexglue @c94f5eb's compiled texture_load_{32,64}bpb_scaled compute shaders (derived from Xenia, BSD-3;
+// layout read from their SPIR-V), but each thread stores its blocks into a storage view of the texture instead of a staging buffer that is then
+// copied to the image.
+// With CONVERT_MODE 1 or 2 (32 bits per block only) the words are the depth of a guest 24-bit depth and 8-bit stencil texel and are converted to
+// the float32 bits of the host's R32_SFLOAT texture like rexglue @c94f5eb's compiled texture_load_depth_{unorm,float}_scaled shaders do (1: 24-bit
+// unorm, 2: 20e4 float): the depth textures need no staging buffer and copy either.
+//
+// Stores: a lane reads one 16-byte unit (4 blocks of 32 bits, 2 of 64), keeps it in group-shared memory, and after a barrier the 32 lanes of a row
+// store the row's blocks to consecutive x positions: an image store of a wave writes 32 consecutive texels (128 or 256 bytes) instead of one texel
+// out of every 8 or 4 (the earlier layout: a thread stored 8 consecutive blocks). Bit-identical to that layout over 25 configurations (32 and 64 bits,
+// both depth conversions, scales 1-4, band loads with guest and host offsets, sizes that are not multiples of the group) on an AMD RDNA4 and an
+// RDNA2 GPU of the host, 1.15-1.55x faster there (docs/evidence/wave5-20261001/load_shader_bench.txt).
+// A group is 32 lanes x 8 rows: 128 blocks (32 bits) or 64 blocks (64 bits) wide, 8 rows tall; dispatch ceil(blocks_x / that) x ceil(rows / 8).
+// Build: glslangValidator -V --target-env vulkan1.1 -DBPB_LOG2=2|3 [-DCONVERT_MODE=1|2] (see gpu/xenos/rexglue/rcomp/shaders/build.sh).
+#version 450
+
+#ifndef BPB_LOG2
+#error BPB_LOG2 must be 2 (32 bits per block) or 3 (64 bits per block)
+#endif
+#ifndef CONVERT_MODE
+#define CONVERT_MODE 0
+#endif
+#if CONVERT_MODE != 0 && BPB_LOG2 != 2
+#error CONVERT_MODE needs 32 bits per block
+#endif
+
+// Blocks in one 16-byte unit, and blocks a row of 32 lanes covers.
+#define UNIT_BLOCKS (16 >> BPB_LOG2)
+#define GROUP_BLOCKS_X (32 * UNIT_BLOCKS)
+#define GROUP_ROWS 8
+
+layout(local_size_x = 32, local_size_y = GROUP_ROWS, local_size_z = 1) in;
+
+layout(push_constant) uniform LoadConstants {
+  uint is_tiled_3d_endian_scale;
+  uint guest_offset;
+  uint guest_pitch_aligned;
+  uint guest_z_stride_block_rows_aligned;
+  uvec3 size_blocks;
+  uint host_row_offset;
+  uint host_pitch;
+  uint height_texels;
+} pc;
+
+#if BPB_LOG2 == 2
+layout(set = 0, binding = 0, r32ui) uniform writeonly uimage2D dest;
+#else
+layout(set = 0, binding = 0, rg32ui) uniform writeonly uimage2D dest;
+#endif
+layout(set = 1, binding = 0, std430) readonly buffer Source { uvec4 source[]; };
+
+#if BPB_LOG2 == 2
+shared uint tile[GROUP_ROWS][GROUP_BLOCKS_X];
+#else
+shared uvec2 tile[GROUP_ROWS][GROUP_BLOCKS_X];
+#endif
+
+uvec4 EndianSwap32(uvec4 value, uint endian) {
+  if (endian == 1u || endian == 2u) {
+    value = ((value & 0x00FF00FFu) << 8u) | ((value & 0xFF00FF00u) >> 8u);
+  }
+  if (endian == 2u || endian == 3u) {
+    value = (value << 16u) | (value >> 16u);
+  }
+  return value;
+}
+
+#if CONVERT_MODE == 1
+uint ConvertWord(uint word) {
+  uint depth = word >> 8u;
+  depth += depth >> 23u;
+  return floatBitsToUint(float(depth) * 5.96046448e-08);
+}
+#elif CONVERT_MODE == 2
+uint ConvertWord(uint word) {
+  uint depth = word >> 8u;
+  uint mantissa = depth & 0xFFFFFu;
+  uint exponent = depth >> 20u;
+  bool denormal = exponent == 0u;
+  int msb = findMSB(mantissa);
+  uint exponent_value = denormal ? uint(msb) + 4294967277u : exponent;
+  uint mantissa_value = denormal ? ((mantissa << (20u - uint(msb))) & 0xFFFFFu) : mantissa;
+  uint bits = ((exponent_value + 112u) << 23u) | (mantissa_value << 3u);
+  return depth == 0u ? 0u : bits;
+}
+#else
+uint ConvertWord(uint word) { return word; }
+#endif
+
+int TiledOffset2D(ivec2 p, uint pitch, uint bpb_log2) {
+  int macro = ((p.x >> 5) + (p.y >> 5) * int(pitch >> 5)) << (bpb_log2 + 7u);
+  int micro = ((p.x & 7) + ((p.y & 0xE) << 2)) << bpb_log2;
+  int offset = macro + ((micro & ~0xF) << 1) + (micro & 0xF) + ((p.y & 1) << 4);
+  return ((offset & ~0x1FF) << 3) + ((p.y & 16) << 7) + ((offset & 0x1C0) << 2) +
+         (((((p.y & 8) >> 2) + (p.x >> 3)) & 3) << 6) + (offset & 0x3F);
+}
+
+uint SourceAddress(uvec2 host_block, uvec2 scale, uint bpb_log2) {
+  const uint unit_log2 = 4u - bpb_log2;
+  uvec2 host_unit = uvec2(host_block.x >> unit_log2, host_block.y);
+  uvec2 guest_unit = host_unit / scale;
+  uvec2 sub = host_unit - guest_unit * scale;
+  uint tiled = uint(TiledOffset2D(ivec2(int(guest_unit.x << unit_log2), int(guest_unit.y)),
+                                  pc.guest_pitch_aligned, bpb_log2));
+  uint in_unit = (((sub.x * scale.y + sub.y) << unit_log2) +
+                  (host_block.x & ((1u << unit_log2) - 1u))) << bpb_log2;
+  return tiled * (scale.x * scale.y) + in_unit + pc.guest_offset;
+}
+
+void main() {
+  const uint lane = gl_LocalInvocationID.x;
+  const uint group_row = gl_LocalInvocationID.y;
+  const uint row = gl_WorkGroupID.y * uint(GROUP_ROWS) + group_row;
+  const uint first_x = gl_WorkGroupID.x * uint(GROUP_BLOCKS_X);
+  const bool row_valid = row < pc.size_blocks.y;
+  const uvec2 chunk = uvec2(first_x + lane * uint(UNIT_BLOCKS), row);
+  if (row_valid && chunk.x < pc.size_blocks.x) {
+    uint endian = (pc.is_tiled_3d_endian_scale >> 2u) & 3u;
+    uvec2 scale = (uvec2(pc.is_tiled_3d_endian_scale) >> uvec2(4u, 7u)) & 7u;
+    uint address = SourceAddress(chunk, scale, BPB_LOG2);
+    uvec4 words = EndianSwap32(source[address >> 4u], endian);
+#if BPB_LOG2 == 2
+    for (uint i = 0u; i < 4u; ++i) {
+      tile[group_row][lane * 4u + i] = ConvertWord(words[i]);
+    }
+#else
+    for (uint i = 0u; i < 2u; ++i) {
+      tile[group_row][lane * 2u + i] = uvec2(words[i * 2u], words[i * 2u + 1u]);
+    }
+#endif
+  }
+  barrier();
+  if (row_valid) {
+    const int y = int(row + pc.host_row_offset);
+    for (uint k = 0u; k < uint(UNIT_BLOCKS); ++k) {
+      const uint x = first_x + k * 32u + lane;
+      if (x < pc.size_blocks.x) {
+#if BPB_LOG2 == 2
+        imageStore(dest, ivec2(int(x), y), uvec4(tile[group_row][k * 32u + lane], 0u, 0u, 0u));
+#else
+        uvec2 value = tile[group_row][k * 32u + lane];
+        imageStore(dest, ivec2(int(x), y), uvec4(value.x, value.y, 0u, 0u));
+#endif
+      }
+    }
+  }
+}

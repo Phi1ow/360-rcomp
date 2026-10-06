@@ -1,0 +1,390 @@
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -32,6 +32,10 @@
+   // Call in the implementation-specific ClearCache.
+   virtual void ClearCache();
+   void SetSystemPageBlocksValidWithGpuDataWritten();
++  // R-comp: the same for the blocks of slice `slice` of `slices` equal parts of the address space. The byte range [first, last] (inclusive) of the blocks it covered is stored in the optional
++  // outputs (first > last: none).
++  void SetSystemPageBlocksValidWithGpuDataWrittenSlice(uint32_t slice, uint32_t slices, uint32_t* address_first_out = nullptr,
++                                                       uint32_t* address_last_out = nullptr);
+   void InvalidateAllPages();
+ 
+   typedef void (*GlobalWatchCallback)(const std::unique_lock<std::recursive_mutex>& global_lock,
+@@ -100,6 +104,12 @@
+   // the pages they touch, the CPU data is properly loaded to the unmodified
+   // regions in those pages.
+   void RangeWrittenByGpu(uint32_t start, uint32_t length);
++
++  // R-comp (diagnostic audit of the write tracking): the pages of [page_first, page_first + page_count) whose buffer contents are in sync with guest
++  // memory and were not written by the GPU.
++  void RcompGetValidCpuPages(uint32_t page_first, uint32_t page_count, std::vector<uint32_t>& pages_out);
++  // R-comp (audit): how many of the pages [page_first, page_first + page_count) are not valid.
++  uint32_t RcompCountInvalidPages(uint32_t page_first, uint32_t page_count);
+ 
+  protected:
+   SharedMemory(memory::Memory& memory);
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -20,6 +20,8 @@
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
++#include "rcomp/guest_write_tracking.h"
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -103,6 +105,28 @@
+   // Pages that are valid only because the CPU uploaded them lose their valid
+   // bit here, so the next frame re-reads them from guest memory.
+   system_page_flags_valid_ = system_page_flags_valid_and_gpu_written_;
++}
++
++void SharedMemory::SetSystemPageBlocksValidWithGpuDataWrittenSlice(uint32_t slice, uint32_t slices, uint32_t* address_first_out,
++                                                                   uint32_t* address_last_out) {
++  auto global_lock = global_critical_region_.Acquire();
++
++  const uint64_t blocks = system_page_flags_valid_.size();
++  const uint64_t first = blocks * slice / slices;
++  const uint64_t last = blocks * (uint64_t(slice) + 1) / slices;
++  for (uint64_t i = first; i < last; ++i) {
++    system_page_flags_valid_[i] = system_page_flags_valid_and_gpu_written_[i];
++  }
++  if (address_first_out != nullptr && address_last_out != nullptr) {
++    // One block holds the valid bits of 64 pages.
++    if (last > first) {
++      *address_first_out = uint32_t((first * 64) << page_size_log2_);
++      *address_last_out = uint32_t(((last * 64) << page_size_log2_) - 1);
++    } else {
++      *address_first_out = 1;
++      *address_last_out = 0;
++    }
++  }
+ }
+ 
+ void SharedMemory::ClearCache() {
+@@ -316,6 +340,11 @@
+     }
+   }
+ 
++  if (page_size_log2_ == ::rcomp::kGuestWritePageShift) {
++    // R-comp: the guest threads compare their stores with the bytes in memory and skip the mark of an unchanged store, except on a page the GPU
++    // wrote (include/rcomp/guest_write_tracking.h); the flag follows system_page_flags_valid_and_gpu_written_ (this thread only writes it).
++    ::rcomp::note_gpu_written_pages(valid_page_first, valid_page_last - valid_page_first + 1, written_by_gpu);
++  }
+   if (written_by_gpu) {
+     RcompPagesWrittenByGpu(valid_page_first, valid_page_last - valid_page_first + 1);
+   }
+@@ -325,6 +354,36 @@
+         valid_page_first << page_size_log2_,
+         (valid_page_last - valid_page_first + 1) << page_size_log2_, true, false);
+   }
++}
++
++void SharedMemory::RcompGetValidCpuPages(uint32_t page_first, uint32_t page_count, std::vector<uint32_t>& pages_out) {
++  pages_out.clear();
++  const uint32_t total_pages = kBufferSize >> page_size_log2_;
++  if (page_first >= total_pages) {
++    return;
++  }
++  page_count = std::min(page_count, total_pages - page_first);
++  auto global_lock = global_critical_region_.Acquire();
++  for (uint32_t page = page_first; page < page_first + page_count; ++page) {
++    const uint64_t bit = uint64_t(1) << (page & 63);
++    if ((system_page_flags_valid_[page >> 6] & bit) && !(system_page_flags_valid_and_gpu_written_[page >> 6] & bit)) {
++      pages_out.push_back(page);
++    }
++  }
++}
++
++uint32_t SharedMemory::RcompCountInvalidPages(uint32_t page_first, uint32_t page_count) {
++  const uint32_t total_pages = kBufferSize >> page_size_log2_;
++  if (page_first >= total_pages) {
++    return 0;
++  }
++  page_count = std::min(page_count, total_pages - page_first);
++  uint32_t invalid = 0;
++  auto global_lock = global_critical_region_.Acquire();
++  for (uint32_t page = page_first; page < page_first + page_count; ++page) {
++    invalid += !(system_page_flags_valid_[page >> 6] & (uint64_t(1) << (page & 63)));
++  }
++  return invalid;
+ }
+ 
+ void SharedMemory::UnlinkWatchRange(WatchRange* range) {
+@@ -539,6 +598,10 @@
+     system_page_flags_valid_[i] &= ~invalidate_bits;
+     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
+   }
++  if (page_size_log2_ == ::rcomp::kGuestWritePageShift) {
++    // The CPU wrote these pages: the next upload makes them equal to guest memory again.
++    ::rcomp::note_gpu_written_pages(page_first, page_last - page_first + 1, false);
++  }
+ 
+   FireWatches(page_first, page_last, false);
+ 
+--- a/include/rex/graphics/vulkan/shared_memory.h
++++ b/include/rex/graphics/vulkan/shared_memory.h
+@@ -49,6 +49,12 @@
+ 
+   VkBuffer buffer() const { return buffer_; }
+ 
++  // R-comp DIAGNOSTIC (cvar rcomp_stale_audit): called once a frame by the command processor thread, a no-op unless the cvar is set.
++  void RcompStaleAudit();
++  // R-comp DIAGNOSTIC (same cvar): a draw uses the guest range [start, start + length) without requesting it (the vertex buffer slot is unchanged): count and report the
++  // pages of the range that are not valid. A no-op unless the cvar is set.
++  void RcompAuditUsedRange(uint32_t start, uint32_t length);
++
+  protected:
+   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
+                                         uint32_t length_allocations) override;
+@@ -81,6 +87,9 @@
+   std::vector<uint64_t> rcomp_changed_hashes_;
+   std::vector<uint32_t> rcomp_request_pages_;
+   uint64_t rcomp_skipped_pages_ = 0, rcomp_uploaded_pages_ = 0;
++  // The stale-page audit (cvar rcomp_stale_audit): the pages of the slice being checked and the ones that looked stale in the previous call.
++  std::vector<uint32_t> rcomp_audit_pages_;
++  std::vector<uint32_t> rcomp_audit_suspects_;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -28,6 +28,8 @@
+ #include <rex/math.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++#include "rcomp/guest_write_tracking.h"
++
+ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+                     "Use sparse shared memory on Vulkan")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -45,6 +47,12 @@
+ // The copy of guest pages that asks for the source lines ahead and stores to the upload memory with non-temporal stores: measured neutral (phases 120 and 124).
+ REXCVAR_DEFINE_BOOL(rcomp_upload_prefetch, false, "GPU/Vulkan",
+                     "Copy the guest pages of the shared memory uploads with software prefetch and non-temporal stores")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++// R-comp DIAGNOSTIC (store comparison, include/rcomp/guest_write_tracking.h): once a frame a slice of the pages that are valid, were not written by the GPU and carry no
++// pending guest write mark is hashed again; a page whose bytes are not the ones the buffer received (and still not a moment later) is a missed invalidation.
++REXCVAR_DEFINE_BOOL(rcomp_stale_audit, false, "GPU/Vulkan",
++                    "DIAGNOSTIC: rehash a slice of the valid shared memory pages every frame and report the ones whose guest bytes changed without an invalidation (costs frame time)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::vulkan {
+@@ -376,6 +384,91 @@
+ }  // namespace
+ #endif
+ 
++void VulkanSharedMemory::RcompStaleAudit() {
++  static const bool enabled = REXCVAR_GET(rcomp_stale_audit);
++  if (!enabled) {
++    return;
++  }
++  constexpr uint32_t kSlicePages = 1024;
++  static uint32_t cursor = 0;
++  static uint64_t calls = 0, scanned = 0, suspects_total = 0, stale = 0;
++  const uint32_t total_pages = uint32_t(rcomp_page_hashes_.size());
++  const size_t page_bytes = size_t(1) << page_size_log2();
++  auto hash_page = [&](uint32_t page) {
++    uint64_t hash = XXH3_64bits(memory().TranslatePhysical(page << page_size_log2()), page_bytes);
++    return hash ? hash : uint64_t(1);
++  };
++  auto pending_mark = [](uint32_t page) {
++    return __atomic_load_n(&::rcomp::g_guest_physical_written[page], __ATOMIC_ACQUIRE) != 0;
++  };
++  // The suspects of the previous call: still valid, still not written by the GPU, still no pending mark, and still not the bytes that were uploaded.
++  std::vector<uint32_t>& pages = rcomp_audit_pages_;
++  for (uint32_t page : rcomp_audit_suspects_) {
++    RcompGetValidCpuPages(page, 1, pages);
++    if (pages.empty() || !rcomp_page_hashes_[page] || pending_mark(page)) {
++      continue;
++    }
++    const uint64_t now = hash_page(page);
++    if (now != rcomp_page_hashes_[page] && !pending_mark(page)) {
++      ++stale;
++      if (stale <= 40) {
++        const uint8_t* head = memory().TranslatePhysical(page << page_size_log2());
++        std::fprintf(stderr, "RCOMP-STALE-PAGE page=0x%x frame=%llu uploaded_hash=%016llx guest_hash=%016llx head=", page,
++                     (unsigned long long)command_processor_.GetCurrentFrame(), (unsigned long long)rcomp_page_hashes_[page],
++                     (unsigned long long)now);
++        for (uint32_t i = 0; i < 32; ++i) {
++          std::fprintf(stderr, "%02x", head[i]);
++        }
++        std::fprintf(stderr, "\n");
++      }
++    }
++  }
++  rcomp_audit_suspects_.clear();
++  RcompGetValidCpuPages(cursor, kSlicePages, pages);
++  cursor += kSlicePages;
++  if (cursor >= total_pages) {
++    cursor = 0;
++  }
++  for (uint32_t page : pages) {
++    if (!rcomp_page_hashes_[page] || pending_mark(page)) {
++      continue;
++    }
++    ++scanned;
++    if (hash_page(page) != rcomp_page_hashes_[page] && !pending_mark(page)) {
++      rcomp_audit_suspects_.push_back(page);
++      ++suspects_total;
++    }
++  }
++  if ((++calls & 0x3F) == 0) {
++    std::fprintf(stderr, "RCOMP-STALE-AUDIT calls=%llu scanned_pages=%llu suspects=%llu stale=%llu\n", (unsigned long long)calls,
++                 (unsigned long long)scanned, (unsigned long long)suspects_total, (unsigned long long)stale);
++  }
++}
++
++void VulkanSharedMemory::RcompAuditUsedRange(uint32_t start, uint32_t length) {
++  static const bool enabled = REXCVAR_GET(rcomp_stale_audit);
++  if (!enabled || !length) {
++    return;
++  }
++  static uint64_t used = 0, used_invalid = 0, invalid_pages_total = 0;
++  ++used;
++  const uint32_t first = start >> page_size_log2();
++  const uint32_t last = (start + length - 1) >> page_size_log2();
++  const uint32_t invalid = RcompCountInvalidPages(first, last - first + 1);
++  if (invalid) {
++    ++used_invalid;
++    invalid_pages_total += invalid;
++    if (used_invalid <= 20) {
++      std::fprintf(stderr, "RCOMP-STALE-VERTEX address=0x%08x size=0x%x invalid_pages=%u of %u frame=%llu\n", start, length, invalid,
++                   last - first + 1, (unsigned long long)command_processor_.GetCurrentFrame());
++    }
++  }
++  if ((used & 0xFFFFF) == 0) {
++    std::fprintf(stderr, "RCOMP-STALE-VERTEX-COUNT used=%llu used_invalid=%llu invalid_pages=%llu\n", (unsigned long long)used,
++                 (unsigned long long)used_invalid, (unsigned long long)invalid_pages_total);
++  }
++}
++
+ void VulkanSharedMemory::RcompPagesWrittenByGpu(uint32_t page_first, uint32_t page_count) {
+   if (page_first >= rcomp_page_hashes_.size()) {
+     return;
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -277,6 +277,7 @@
+     if (read_ptr_writeback_ptr_) {
+       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+                                        read_ptr_index_);
++      memory_->NoteCpWrite(read_ptr_writeback_ptr_, 4);
+     }
+ 
+     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
+@@ -384,6 +385,7 @@
+       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
+       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
+       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
++      memory_->NoteCpWrite(mem_addr, 4);
+     }
+   } else {
+     switch (index) {
+@@ -1174,6 +1176,7 @@
+   mem_addr &= ~0x3;
+   reg_val = GpuSwap(reg_val, endianness);
+   memory::store(memory_->TranslatePhysical(mem_addr), reg_val);
++  memory_->NoteCpWrite(mem_addr, 4);
+ 
+   return true;
+ }
+@@ -1188,6 +1191,7 @@
+     auto addr = write_addr & ~0x3;
+     write_data = GpuSwap(write_data, endianness);
+     memory::store(memory_->TranslatePhysical(addr), write_data);
++    memory_->NoteCpWrite(addr, 4);
+     write_addr += 4;
+   }
+ 
+@@ -1249,6 +1253,7 @@
+       write_reg_addr &= ~0x3;
+       write_data = GpuSwap(write_data, endianness);
+       memory::store(memory_->TranslatePhysical(write_reg_addr), write_data);
++      memory_->NoteCpWrite(write_reg_addr, 4);
+     } else {
+       // Register.
+       WriteRegister(write_reg_addr, write_data);
+@@ -1312,6 +1317,7 @@
+   }
+ #endif
+   memory::store(memory_->TranslatePhysical(address), data_value);
++  memory_->NoteCpWrite(address, 4);
+   return true;
+ }
+ 
+@@ -1340,6 +1346,7 @@
+   assert_true(endianness == xenos::Endian::k8in16);
+   memory::copy_and_swap_16_unaligned(memory_->TranslatePhysical(address), extents,
+                                      rex::countof(extents));
++  memory_->NoteCpWrite(address, sizeof(extents));
+   return true;
+ }
+ 
+@@ -1374,6 +1381,7 @@
+       pSampleCounts->ZPass_A = fake_sample_count;
+       pSampleCounts->Total_A = fake_sample_count;
+     }
++    memory_->NoteCpWrite(register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR], sizeof(xe_gpu_depth_sample_counts));
+   }
+ 
+   return true;
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -330,11 +330,11 @@
+   length_unscaled = std::min(length_unscaled, 0x20000000 - start_unscaled);
+ 
+   if (IsDrawResolutionScaled()) {
+-    ++rcomp_lookup_epoch_;
+     uint32_t page_first = start_unscaled >> 12;
+     uint32_t page_last = (start_unscaled + length_unscaled - 1) >> 12;
+     uint32_t block_first = page_first >> 5;
+     uint32_t block_last = page_last >> 5;
++    bool rcomp_scaled_state_changed = false;
+     auto global_lock = global_critical_region_.Acquire();
+     for (uint32_t i = block_first; i <= block_last; ++i) {
+       uint32_t add_bits = UINT32_MAX;
+@@ -344,8 +344,12 @@
+       if (i == block_last && (page_last & 31) != 31) {
+         add_bits &= (UINT32_C(1) << ((page_last & 31) + 1)) - 1;
+       }
++      rcomp_scaled_state_changed |= (add_bits & ~scaled_resolve_pages_[i]) != 0;
+       scaled_resolve_pages_[i] |= add_bits;
+       scaled_resolve_pages_l2_[i >> 6] |= UINT64_C(1) << (i & 63);
++    }
++    if (rcomp_scaled_state_changed) {
++      ++rcomp_lookup_epoch_;
+     }
+   }
+ 
+@@ -1167,9 +1171,9 @@
+     // Resolves themselves do exactly the opposite of what this should do.
+     return;
+   }
+-  ++rcomp_lookup_epoch_;
+   // Mark scaled resolve ranges as non-scaled. Textures themselves will be
+   // invalidated by their shared memory watches.
++  bool rcomp_scaled_state_changed = false;
+   uint32_t resolve_page_first = address_first >> 12;
+   uint32_t resolve_page_last = address_last >> 12;
+   uint32_t resolve_block_first = resolve_page_first >> 5;
+@@ -1198,12 +1202,17 @@
+       if (resolve_block_index == resolve_block_last && (resolve_page_last & 31) != 31) {
+         resolve_keep_bits |= ~((UINT32_C(1) << ((resolve_page_last & 31) + 1)) - 1);
+       }
++      rcomp_scaled_state_changed |= (scaled_resolve_pages_[resolve_block_index] & ~resolve_keep_bits) != 0;
+       scaled_resolve_pages_[resolve_block_index] &= resolve_keep_bits;
+       if (scaled_resolve_pages_[resolve_block_index] == 0) {
+         scaled_resolve_pages_l2_[i] &= ~(UINT64_C(1) << resolve_block_relative_index);
+       }
+     }
+   }
++  if (rcomp_scaled_state_changed) {
++    // The answers of FindOrCreateTexture for the pages that stopped being scaled-resolved are not the same any more (see rcomp_lookup_cache_).
++    ++rcomp_lookup_epoch_;
++  }
+ }
+ 
+ }  // namespace rex::graphics

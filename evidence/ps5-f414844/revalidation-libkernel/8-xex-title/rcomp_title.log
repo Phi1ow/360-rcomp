@@ -1,0 +1,32 @@
+RCOMP-TITLE begin title=PPSA88360 build=f9ff9053f5b5dba1 pid=120 argc=1 argv0=
+RCOMP-TITLE log path=/app0/rcomp_title.log
+RCOMP-TITLE mem start flexible_available=463470592 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+rcomp platform selftest: backend=ps5 fork=0 page=16384
+PASS reserve_release
+PASS commit_bounds
+PASS write_read
+PASS decommit_zeroes
+PASS protect_read_faults
+PASS uncommitted_and_guard_fault
+PASS runtime_range_conflict
+PASS stats_accounting
+PASS repeat_reserve_release_x20
+INFO alloc_failure_many_reservations: 4 concurrent 4 GiB reservations succeeded, next = OutOfMemory
+PASS alloc_failure_many_reservations
+PASS ps5_backend_runs_and_unwind
+SUMMARY pass=11 fail=0 skip=0
+RCOMP-TITLE platform status=0
+RCOMP-TITLE xex begin path=/app0/fixtures/xex/rcomp_title.xex
+RCOMP-XEX variable_import unresolved module=xboxkrnl.exe ordinal=0x0156 name=XboxHardwareInfo slot=0x8200300C poison=0x00001560
+RCOMP-XEX load path=/app0/fixtures/xex/rcomp_title.xex bytes=24576 status=Ok base=0x82000000 size=0x5000 entry=0x82001000 (PPC_IMAGE_BASE=0x82000000 PPC_IMAGE_SIZE=0x5000) libraries=2 thunks=3 function_slots=1 variables_resolved=1 variables_unresolved=1
+{"id":"xex/rcomp_title/loader_imports","status":"PASS","stage":"execute","reason":""}
+RCOMP-XEX functions=7 entry_mapped=1
+{"id":"xex/rcomp_title/mode0_run","status":"PASS","stage":"execute","reason":""}
+{"id":"xex/rcomp_title/mode1_unresolved_import","status":"PASS","stage":"execute","reason":"missing_import: module=xbdm_xex ordinal=0x0012 name=(not in any export table) lr=0x820010E0 r3=0x00000077 r4=0x4002FF84 r5=0x00008000 r6=0x00000000"}
+{"id":"xex/rcomp_title/mode2_variable_import","status":"PASS","stage":"execute","reason":""}
+{"id":"xex/rcomp_title/mode3_unresolved_variable_poison","status":"PASS","stage":"execute","reason":""}
+{"id":"xex/rcomp_title/mode4_function_slot_poison","status":"PASS","stage":"execute","reason":""}
+RCOMP-XEX executed=6 pass=6 fail=0
+RCOMP-TITLE xex status=0
+RCOMP-TITLE mem end flexible_available=462422016 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+RCOMP-TITLE end status=0

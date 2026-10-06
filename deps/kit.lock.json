@@ -1,0 +1,50 @@
+{
+  "comment": "Prebuilt PS5 toolchain kit consumed by tools/install_kit.py: the pieces R-comp does not build itself. Sizes and SHA-256 are those of the GitHub release assets (the release lists the same digests). Everything extracts under build/ at the checkout root. No firmware, no game data, no Sony SDK; licences in the READMEs inside the archives and in deps/deps.lock.",
+  "repository": "Phi1ow/360-rcomp",
+  "tag": "ps5-kit-toolchain-20261004",
+  "assets": [
+    {
+      "name": "rcomp-ps5-kit-toolchain-20261004.tar.gz",
+      "size": 79262546,
+      "sha256": "eff8fb7ca88b58786824952d9e6dabc0519b21406aa29a25bbad47f49b97d575",
+      "provides": [
+        "build/vulkan-gta-radv-20260928/ps5-sdk/bin/prospero-clang",
+        "build/vulkan-gta-radv-20260928/ps5-sdk/target/include/errno.h",
+        "build/vulkan-gta-radv-20260928/ps5-sdk/target/include/float.h",
+        "build/vulkan-gta-radv-20260928/radv-ps5/src/amd/vulkan/libvulkan_radeon.a",
+        "build/vulkan-gta-radv-20260928/compiler-rt-ps5/lib",
+        "build/prime-ffmpeg-xma-20260929/ps5/prefix/lib/libavcodec.a",
+        "build/platform-ps5-tools/ps5-native-tool.exe",
+        "build/platform-ps5-tools/libc.prx"
+      ]
+    },
+    {
+      "name": "rcomp-ps5-kit-xenos-source-v3-20261004.tar.gz",
+      "size": 13753250,
+      "sha256": "140456919015ffc3f406b00f0ca22a7e77195f69b6ab52082c5334df0cbdb530",
+      "replace": ["build/prime-radv-resume-20260929/xenos-source-v3"],
+      "provides": [
+        "build/prime-radv-resume-20260929/xenos-source-v3/src/graphics/vulkan/command_processor.cpp"
+      ]
+    },
+    {
+      "name": "rcomp-ps5-kit-ps5vulkan-link-20261004.tar.gz",
+      "size": 19219,
+      "sha256": "5aa870f18e41b1a638f720651375bd211ddad8b794a424c1c86b30ded3110229",
+      "provides": [
+        "build/vulkan-gta-radv-20260928/src/PS5_Vulkan/tools/radv-link.sh",
+        "build/vulkan-gta-radv-20260928/src/PS5_Vulkan/vendor/ps5/sdk/stubs"
+      ]
+    },
+    {
+      "name": "rcomp-ps5-kit-link-extras-20261004.tar.gz",
+      "size": 1712301,
+      "sha256": "0aa9447a926265e54ab312d5b3f8a0d9dab2f4deb80cc584e7b5d05bd9bfe3fd",
+      "provides": [
+        "build/platform-audioout-20260930/exports-9.40.json",
+        "build/platform-ps5-title-kernel-boot/dist/PPSA88360/sce_sys/icon0.png",
+        "build/prime-vulkan-headers/Vulkan-Headers-e3b1eec08173d6b825cd3ac88c885a63b621504a/include"
+      ]
+    }
+  ]
+}

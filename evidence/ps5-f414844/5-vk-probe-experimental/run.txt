@@ -1,0 +1,17 @@
+00:02:46 status before: ok idle
+00:02:47 $ ps5_ftp_kit.py push D:\emu 4\kit\ps5-kit\5-vk-probe-experimental\PPSA88360 -> exit 0
+00:02:47   deleting previous /data/homebrew/PPSA88360
+00:02:47     /data/homebrew/PPSA88360/eboot.bin (17572042 bytes)
+00:02:47     /data/homebrew/PPSA88360/manifest.sha256 (339 bytes)
+00:02:47     /data/homebrew/PPSA88360/sce_module/libc.prx (1284674 bytes)
+00:02:47     /data/homebrew/PPSA88360/sce_sys/icon0.png (1496 bytes)
+00:02:47     /data/homebrew/PPSA88360/sce_sys/param.json (734 bytes)
+00:02:47   OK: 5 files in /data/homebrew/PPSA88360, sizes checked. Launch PPSA88360 on the console now.
+00:02:52 chmod: chmodtitle: /data/homebrew/PPSA88360 fixed=8 failed=0
+00:02:54 launch: ok launched PPSA88360 result=0x00000018 via lncUtilApp/foreground as user 395971800 (the console reports the title running)
+00:02:56 running: ok procs app=24 title=PPSA88360 count=1 pids=106
+00:04:58 TIMEOUT after 120s: kill: ok killed PPSA88360: PPSA88360 is gone (app id 24, 1 processes killed, result 0x00000000)
+00:05:01 status after: ok idle
+00:05:03 $ ps5_ftp_kit.py pull --out D:\emu 4\ps5-logs\5-vk-probe-experimental -> exit 0
+00:05:03   downloaded /data/homebrew/PPSA88360/rcomp_title.log -> D:\emu 4\ps5-logs\5-vk-probe-experimental\rcomp_title.log
+00:05:03   verdict: end status=0

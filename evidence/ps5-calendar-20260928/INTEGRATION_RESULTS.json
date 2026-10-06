@@ -1,0 +1,72 @@
+{
+  "ps5": {
+    "status": "PASS",
+    "title_id": "PPSA88360",
+    "build_id": "38d8473ebfa9282d",
+    "platform_checks": 13,
+    "calendar_threads_checks": 20,
+    "ppc_runs": 6,
+    "checks_per_ppc_run": 45,
+    "console_directory": "build/prime-calendar-resume-20260928/console/calendar/PPSA88360-20260928T204607Z"
+  },
+  "host": {
+    "status": "PASS",
+    "runtime_tests": 21,
+    "windows_differential_cases": 4005,
+    "calendar_threads_checks": 20,
+    "boot_regression_checks": 50,
+    "pool_rtl_regression_checks": 20,
+    "modules_regression_checks": 29,
+    "ubsan": true,
+    "negative_control": {
+      "status": "PASS",
+      "expected_process_exit": 1,
+      "observed_guest_exit": "0x0000E403",
+      "unchanged_production_archives": 5
+    }
+  },
+  "compiled_input_files_unchanged": 606,
+  "cleanup": {
+    "host": "<PS5_IP>",
+    "title_id": "PPSA88360",
+    "action": "close",
+    "initial_status": "ok idle\n",
+    "quit": "ok bye\n",
+    "status_verdict": "PASS"
+  },
+  "shadowmount_unchanged": {
+    "bytes": 107,
+    "sha256": "034051a8d408c3abefd603d13c022c32df6cf189b76fdecb789af12c876acac8"
+  },
+  "gta_iv": {
+    "gate": "BLOCKED",
+    "functions_missing": 166,
+    "variables_missing": 3,
+    "generated_functions": 55699,
+    "execution": "NOT TESTED"
+  },
+  "graphics": "NOT TESTED",
+  "source_policy": "R-comp only; obsolete Emu-3 bundle excluded",
+  "files": {
+    "build/prime-calendar-resume-20260928/console/calendar/PPSA88360-20260928T204607Z/rcomp_title.log": {
+      "bytes": 4442,
+      "sha256": "27d14b091251dda8e40552dead92e8f87667c677d580091b4b31f9b63fc073ae"
+    },
+    "build/prime-calendar-resume-20260928/console/calendar/PPSA88360-20260928T204607Z/run.txt": {
+      "bytes": 593,
+      "sha256": "f55165e96a2fa9d69ef21f0c2f789042cf0039406bdf33462ae9ed4c0b554138"
+    },
+    "build/prime-calendar-resume-20260928/console/calendar/PPSA88360-20260928T204607Z/klog.txt": {
+      "bytes": 147990,
+      "sha256": "bf5231c65cec446cb0f602f92dff731cee3d69421b864d471168cfd283a572f0"
+    },
+    "build/platform-ps5-title-calendar-threads/dist/PPSA88360/eboot.bin": {
+      "bytes": 1319636,
+      "sha256": "5f2cb9e9cc62bdb87c89843719c7e7036f25761c873cc1f24c677ffb87dac66d"
+    },
+    "build/platform-ps5-title-calendar-threads/dist/PPSA88360/fixtures/xex/rcomp_title.xex": {
+      "bytes": 24576,
+      "sha256": "dceef0374cbfa35a848a3c7c86449087f7d3a44e14c9107412b15c35dcad8b53"
+    }
+  }
+}

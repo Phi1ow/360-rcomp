@@ -1,0 +1,25 @@
+RCOMP-TITLE begin title=PPSA88360 build=8815a60f60749720 pid=118 argc=1 argv0=
+RCOMP-TITLE log path=/app0/rcomp_title.log
+RCOMP-TITLE mem start flexible_available=463470592 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+rcomp platform selftest: backend=ps5 fork=0 page=16384
+PASS reserve_release
+PASS commit_bounds
+PASS write_read
+PASS decommit_zeroes
+PASS protect_read_faults
+PASS uncommitted_and_guard_fault
+PASS runtime_range_conflict
+PASS stats_accounting
+PASS repeat_reserve_release_x20
+INFO alloc_failure_many_reservations: 4 concurrent 4 GiB reservations succeeded, next = OutOfMemory
+PASS alloc_failure_many_reservations
+PASS ps5_backend_runs_and_unwind
+SUMMARY pass=11 fail=0 skip=0
+RCOMP-TITLE platform status=0
+RCOMP-TITLE m3 begin root=/app0/fixtures/m3
+RCOMP-M3 begin index=0 id=m3/rcomp_m3/test_m3_main
+{"id":"m3/rcomp_m3/test_m3_main","index":0,"status":"PASS","stage":"execute","reason":""}
+RCOMP-M3 executed=1 pass=1 fail=0 vfs_lexical_fallback=1
+RCOMP-TITLE m3 status=0
+RCOMP-TITLE mem end flexible_available=462422016 (rc=0x00000000) flexible_configured=469762048 (rc=0x00000000) direct_size=12884901888
+RCOMP-TITLE end status=0

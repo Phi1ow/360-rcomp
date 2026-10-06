@@ -1,0 +1,844 @@
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00001 -> /system_ex/app/WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00002 -> /system_ex/app/WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99611 -> /system_ex/app/PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99700 -> /system_ex/app/PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99701 -> /system_ex/app/PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99702 -> /system_ex/app/PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99703 -> /system_ex/app/PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99710 -> /system_ex/app/PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99711 -> /system_ex/app/PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA88360 -> /system_ex/app/PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99420 -> /system_ex/app/PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99421 -> /system_ex/app/PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[SceShellCore] Libc Heap Status: free 39%, in-use 4453.6 KB, trend +0.2 KB/min, peak 6877.8 KB, when 5486 [sec]
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99420 -> /system_ex/app/PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99421 -> /system_ex/app/PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00001 -> /system_ex/app/WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00002 -> /system_ex/app/WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99611 -> /system_ex/app/PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99700 -> /system_ex/app/PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99701 -> /system_ex/app/PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99702 -> /system_ex/app/PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99703 -> /system_ex/app/PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99710 -> /system_ex/app/PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99711 -> /system_ex/app/PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA88360 -> /system_ex/app/PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99420 -> /system_ex/app/PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99421 -> /system_ex/app/PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00001 -> /system_ex/app/WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00002 -> /system_ex/app/WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99611 -> /system_ex/app/PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99700 -> /system_ex/app/PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99701 -> /system_ex/app/PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99702 -> /system_ex/app/PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[SceWorkaroundCtl] PERIODIC_DOWNLOAD_INTERVAL_SEC={86400} elapsed={5506} isFirstTime={1}
+<118>[SceWorkaroundCtl] start DownloadFile
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99703 -> /system_ex/app/PPSA99703
+<118>[SceWorkaroundCtl] ifModifiedSince={Tue, 21 Apr 2026 02:49:43 +0000}
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\http_client.cpp(141) Get: WC_ISOK::0x8041013d
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\log_util.cpp(71) rtcReformatRFC2822toRFC3339: WC_ISOK::0x80b50007
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\log_util.cpp(99) SetLastModifiedDate: WC_ISOK::0x80b50007
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\workaround_ctl_manager.cpp(326) DownloadFile: WC_ISOK::0x8041013d
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\workaround_ctl_manager.cpp(498) Run: WC_CONTINUE::0x8041013d
+<118>[SceWorkaroundCtl] PERIODIC_CHECK_INTERVAL_SEC={420}
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99710 -> /system_ex/app/PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99711 -> /system_ex/app/PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA88360 -> /system_ex/app/PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<126> EXEC /system/vsh/app/NPXS40112/eboot.bin [unspecified], vm#0, dmem#0 abi=native category=unknown <5524463 msec>
+<118>[SceShellCore] VM Stats: RSS 332.5 921.8, kernel 318.5 99.4, wire count 382.4 123.8, swap out 0.0, page table CPU 4436/9216 GPU 124/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  15.0/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  88.1/ 678.1   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  31.1/ 157.7 529.8/2567.8 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   5.6/  25.2 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.5   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.9/ 760.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.2/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   3.1/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   9.6/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  60.4/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.7/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   4.2/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   3.5/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   5.4/  18.5   0.0/   0.0 kstuff.elf
+<118>[SceShellCore] FMEM  23.6/  37.2   0.0/   0.0 shadowmountplus.elf
+<118>[SceShellCore] FMEM   2.8/  14.3   0.0/   0.0 payload.elf
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99420 -> /system_ex/app/PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99421 -> /system_ex/app/PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00001 -> /system_ex/app/WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00002 -> /system_ex/app/WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99611 -> /system_ex/app/PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99700 -> /system_ex/app/PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99701 -> /system_ex/app/PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99702 -> /system_ex/app/PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99703 -> /system_ex/app/PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99710 -> /system_ex/app/PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99711 -> /system_ex/app/PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA88360 -> /system_ex/app/PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+# process pid=126, payload.elf calls exit() exit_value=0.
+<118>[SceShellCore] VM Stats: RSS 329.7 921.8, kernel 318.5 99.4, wire count 382.4 123.8, swap out 0.0, page table CPU 4428/9216 GPU 124/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  15.0/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  88.1/ 678.1   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  31.1/ 157.7 529.8/2567.8 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   5.6/  25.2 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.5   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.9/ 760.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.2/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   3.1/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   9.6/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  60.4/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.7/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   4.2/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   3.5/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   5.4/  18.5   0.0/   0.0 kstuff.elf
+<118>[SceShellCore] FMEM  23.6/  37.2   0.0/   0.0 shadowmountplus.elf
+<118>[SceLncService] launchApp(PPSA88360)
+<118>[SceLncService] category={gd} appCategoryType={0x00000000} isVRMode={0}
+<118>[SceLncService] hnm,psnf,pc,tk,ns,pf,htm,at,ts={1,0,0,0,0,1,1,1,0} appBootMode={2}
+<118>[SceLncService] appType={SCE_LNC_APP_TYPE_BIG_APP} [] appVer={} contentVersion={01.000.000} appCategoryType={0x00000000}
+<118>[SceLncService] Waiting for LoginMgr
+<118>[SceLncService] Num. of logged-in users is 1
+<118>[SceLncService] BigApp Launch Ready: Waiting
+<118>[SceLncService] BigApp Launch Ready: OK
+<118>[SceLncService] PrepareProcessLaunchDebuggerCheck()
+<118>[SceLncService] PrepareProcessLaunchDebuggerCheck() returned
+<118>[SceLncService] EnsureBigAppBudget()
+<118>[ResArbitrator][api      ]sceResourceArbitratorEnsureBigAppBudget[187e0](237)  : categoryType[0x0], titleId[PPSA88360], isConfirmed[false]
+<118>[ResArbitrator][TestId   ]EnsureBudget            [187e0]( 41)  : EnsureBudget()
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [187e0]( 40)  : Enqueue(id[0], t[1], user[0] state[RUNNING] appId:[0xffffffff]) size[1]
+<118>[ResArbitrator][App      ]GetExecutable           [1893f](151)  : Target id[0] budgets{vcn[  0] scanin[-] acp[ 0] mem[  0]} prio[2(2)]
+<118>[ResArbitrator][App      ]SetVCNBudget            [1893f](652)  : pid/appId is INVALID_ID.vcn budget not set.
+<118>[ResArbitrator][RA_main  ]cbResult                [1893f](358)  : Callback id[0] type[RESULT] result[true] state[RUNNING]
+<118>[ResArbitrator][TestId   ]raCallback              [1893f](141)  : BigApp[0xffffffff] Changed state"RUNNING"
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[0] state[RUNNING] type[1]) queue.size[0]
+<118>[SceLncService] EnsureBigAppBudget() returned
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](556)  : -1: Id[  0] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[2(2)] from[DIRECT(0x0)] user[0x0] appId[0xffffffff]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -3: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[-1,-] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>[SceSystemStateMgr] Power Mode Change: BIG_APP
+<118>[AvControl] Waiting for the pstate event 
+<118>[Syscore Umd] Set memory pstate (hasRunningGame=0, hasRunningMiniApp=0, isSplashDisplayed=0
+<118>[CRSUI][Info][OnAppLaunchStart::Other applications have been launched. attribute is None, type is BigApp.]
+<118>[CRSUI][Info][proceedRequest::command=[CommandCancel], comment=[gotoHome:]]
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(986) : IsMk3FromUSB : ERROR : [IsMk3FromUSB] sceHmdInternalCheckDeviceModelMk3(): 0x81110004
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(523) : GetHmdConnectionStatus : ERROR : sceHmdInternalGetPUVersion : -2129592316(0x81110004)
+<118>[SceShellUI] I/PSM.UI : OnFocusActiveSceneChanged [Render.NPXS40002 : AppScene] -> [SplashScreen.PPSA88360 : SplashScreen]
+<118>SetDeviceIndexBehavior: mode=MergeAllConnectedDevice, param=null
+<118>[SceShellUI] I/PSM.UI : SceneQ : Loaded[0.00msec] : SplashScreen.PPSA88360 : SplashScreen
+<118>[SceShellUI] I/PSM.UI : SceneQ : Loaded[0.00msec] : LaunchFlow.PPSA88360 : LaunchFlow
+<118>[SceShellUI] I/BGLayer : SetBackgroundTransition (Ellapsed 63313msec since last call) ID=78 TransitionType=CustomImageFade Degree=CrossFade NextImageUri= NextBlurImageUri= NextFallbackImageUri= OverlayImageUri=  BasematType=None Retry=False UseImageViewerSequence=False Resize2K=False
+<118>[SceShellUI] I/BGLayer : Fallback Transition ID=78
+<118>[AvControl] Waiting for the pstate event : done
+<118>[Syscore Umd] Switching to Native mode.
+#### GPU reset sequence starts
+gc_reset_gc_blocks 2021 GPU reset failure GS:0xa0003028 GS2:0x11104008 GS3:0x00000000 CCS:0x80000001
+_sdma_post_gc_reset(): no need to reset SDMA
+#### GPU reset sequence ends
+<118>[Syscore App] W:/Build/J03247116/sys/internal/syscore/app/process_monitor.h(299) m_currentHwMode=0
+<118>[SceSystemStateMgr] CPU                                     HLT GC     GFX  F    U   ID       FAN BAPM
+<118>[SceSystemStateMgr]  800  800  800  800 3200 3200 3200 3200   0 gen2UB  919 1500 1125 00840fd0   1 off
+<118>[SceLncService] sceApplicationSave() categoryType={0x00000000}, debuggerRequestId={0xffffffff}
+<118>[Syscore App] No App needs to save. BigApp does not exist on the memory.
+<118>[SceLncService] W:\Build\J03247173\vsh\shell\shell_core\lnc_service\lnc_manager.cpp(2663) getAppType: LNC_ISOK::0x80940004->0xffffffff
+<118>[SceLncService] BeginAppMount()
+[KERNEL] INFO: begin_app_mount 00000000
+appmgr_create_app(), appid=4018 category=0
+[KERNEL] INFO: launch bigapp: category 0x00000000, container 1
+[0]apr_override_fgc_params() line=10478 appid=16408 num=0
+<118>[SceShellCore] Libc Heap Status: free 39%, in-use 4458.6 KB, trend +5.1 KB/min, peak 6877.8 KB, when 5524 [sec]
+[Amm config] Page table memory : 64 MiB, VA range size 512 GiB, MultiMap VA range size 0 GiB
+wt_application_launch_callback:new target appid=0x4018
+<118>[SceLncService] is_pkgstep={0}
+<118>[SceLncService] PrepareProcessLaunchDebugger()
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[PS]Error: W:\Build\J03247173\vsh\shell\shell_core\process_starter\process_starter_util.cpp at 1027
+<118>num is 2
+<118>[SceLncService] PrepareProcessLaunchDebugger() returned
+<118>[SceLncService] sandboxType={0x00000002}
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[SceLncService] W:\Build\J03247173\vsh\shell\shell_core\lnc_service\lnc_application.cpp(660) initializeMountRoot: LNC_RTRACE::0x80020011
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[SceLncService] W:\Build\J03247173\vsh\shell\shell_core\lnc_service\lnc_manager.cpp(2663) getAppType: LNC_ISOK::0x80940004->0xffffffff
+<118>[SceLncService] spawnApp
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[Syscore App] createApp PPSA88360
+<118>[Syscore App]  ExpandCpuSetMode : disable
+<118>[AvControl] onAppLaunch(appid=0x4018)
+<118>[AvControl] Entry appId(0x4018) supplementaryInfo: 0x0 
+<118>[AvControl] -- app[0](appid=0x4018 attr=0xc2e0057)(GAME RUNNING)(HDR:x HFR:x VR:x VRR:Boost 8K:x) SpecialModeInBg(none) HDCP23(none) supInfo(0x0)
+<118>[AvControl] start capturing (app:0x4018) 
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[AvControl] App Event[POST_BEGIN]: elapse 1[ms] 
+<118>[Syscore App] processSpawn(pid, 0x4018, 0x140182a0, appParam, processParam, 1, 1, 1, param, debug, 0)
+<118>[Syscore App] appParam: appType = 0, titleId = PPSA88360
+<118>[Syscore App] new pid=0x7f[Syscore App] attributeExe= 0
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[AvControl] AudioOut: shared (pid=0x7f)
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[AvControl] VideoOut: shared (pid=0x7f appId=0x4018)
+<118>[AvControl] video owner is switched to registered app(appId=0x4018) 
+<118>[Syscore App] Ready to exec
+<118>[Syscore App] wait for NOTE_EXIT|NOTE_EXEC
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+[KERNEL] INFO: Disable workaround PPRREQ55470_NO_ADDITIONAL_DMEM_192MB
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[SceShellUI] I/BGLayer : SetBackgroundTransition (Retry SetBackgroundTransition ID=79 TransitionType=CustomImageFade Degree=CrossFade NextImageUri= NextBlurImageUri= NextFallbackImageUri= OverlayImageUri=  BasematType=None Retry=True UseImageViewerSequence=False Resize2K=False
+<118>[SceShellUI] I/BGLayer : cancelBackgroundTransition ID=78
+<118>[Syscore App] Add event : pid=0x7f
+<118>[AppMgr Trace]: New Process, pid=0x7f, created.
+<118>[AppMgr Trace]: New App, appId=0x4018, created
+<118>[Syscore App]  ExpandCpuSetMode : disable
+<118>[SceLncService] W:\Build\J03247173\vsh\shell\shell_core\lnc_service\lnc_common.cpp(896) getCurrentTick: LNC_RTRACE::0x80b50001
+<118>[SceLncService] update: appId={0x00004018} appSessionId={63925974880000000}
+[KERNEL] INFO: pid 127
+[KERNEL] INFO: Application Category Type: 00000000
+[KERNEL] INFO: SDK vesion: PS4:08050001 PPR:02000009
+[KERNEL] INFO: Total Memory Size: 0x32d600000
+[KERNEL] INFO: DMEM size: 0x300000000
+[KERNEL] INFO: FMEM size: 0x1c000000
+[KERNEL] INFO: NDA Text size: 0
+[KERNEL] INFO: CPU/GPU page table count: 0x4000 0x4000
+[BAPM] CPU/GPU Frequency: Gen2 Ultra Boost
+[BAPM] Param Set: 7 (Ver:02000009)
+<118>[UninstallRecommend] SetRankByAction [title_id:PPSA88360], [rank:0], [hdd_type:INTERNAL], [atime:2026-09-25 23:14:40.399]
+[MP1] Set CNN WAR VolMargin = 0000004B
+[MP1] Enable CNN WAR Global Flag
+<118>[SceShellUI] I/BGLayer : Fallback Transition ID=79
+<127> EXEC /app0/eboot.bin [user], vm#1, dmem#1 abi=native category=native_game <5531296 msec>
+<118>[SceLncUtil] blockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={1}
+<118>[SceLncUtil] unblockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={0}
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [187d6]( 40)  : Enqueue(id[0], t[1], user[0] state[RUNNING] appId:[0x4018]) size[1]
+<118>[ResArbitrator][TestId   ]lncEventCallback        [187d6]( 77)  : Set Target BigAppId[0x4018] pid[0x7f]
+<118>[ResArbitrator][App      ]GetExecutable           [1893f](151)  : Target id[0] budgets{vcn[  0] scanin[-] acp[ 0] mem[  0]} prio[2(2)]
+<118>[ResArbitrator][App      ]ChangeState             [1893f]( 49)  : replace id[0] state:['RUNNING'->'RUNNING']
+<118>[ResArbitrator][App      ]SetVCNBudget            [1893f](656)  : vcnType is TYPE_UNKNOWN.vcn budget not set.
+<118>[ResArbitrator][RA_main  ]cbResult                [1893f](358)  : Callback id[0] type[RESULT] result[true] state[RUNNING]
+<118>[ResArbitrator][TestId   ]raCallback              [1893f](141)  : BigApp[0x4018] Changed state"RUNNING"
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[0] state[RUNNING] type[1]) queue.size[0]
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](556)  : -1: Id[  0] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[2(2)] from[DIRECT(0x0)] user[0x0] appId[0x4018]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -3: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[-1,-] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>[ResArbitrator][VA_main  ]GetMediaAppInfo         [187d6](123)  : sceKernelGetAppCategoryType(0x7f) ret:SCE_OK categoryType[0x0]
+<118>[SceLncUtil] blockAppSuspend: name={SceNpUds}, appId={0x00000006}, refCount={1}
+<118>[SceLncUtil] unblockAppSuspend: name={SceNpUds}, appId={0x00000006}, refCount={0}
+### GFX(pipe0) Game. proc gen:2 gpu gen:2 ub:1 vmid:1 pid:127
+ +++ num clients 2
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [1893e]( 44)  : Enqueue(id[110], t[1], user[0] state[RUNNING] pid:[0x3c]) size[1]
+<118>[SceShellUI] I/BGLayer : SetBackgroundTransition (Ellapsed 352msec since last call) ID=80 TransitionType=HideGameSplash Degree=Strong NextImageUri= NextBlurImageUri= NextFallbackImageUri= OverlayImageUri=  BasematType=None Retry=False UseImageViewerSequence=False Resize2K=False
+<118>[SceShellUI] I/BGLayer : cancelBackgroundTransition ID=79
+<118>[SceShellUI] I/PSM.UI : OnFocusActiveSceneChanged [SplashScreen.PPSA88360 : SplashScreen] -> [AppScreen : ApplicationScreenScene]
+<118>[ResArbitrator][App      ]GetExecutable           [1893f](151)  : Target id[110] budgets{vcn[ 20] scanin[2K] acp[368] mem[  0]} prio[10(10)]
+<118>[ResArbitrator][IpcServer]Callback                [1893f]( 78)  : S->C Callback Set(id[110] type[RESULT] result[true] state[RUNNING])
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[110] state[RUNNING] type[1]) queue.size[0]
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](556)  : -1: Id[  0] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[2(2)] from[DIRECT(0x0)] user[0x0] appId[0x4018]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -3: Id[110] state[RUNNING] vcn[ 20] scanin[2K] acp[368] mem[  0] prio[10(10)] from[IPMI(0x20b9346a0)] user[0x0] pid[0x3c]*HB*
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -4: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[110,2K] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>SetDeviceIndexBehavior: mode=MergeAllConnectedDevice, param=null
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(986) : IsMk3FromUSB : ERROR : [IsMk3FromUSB] sceHmdInternalCheckDeviceModelMk3(): 0x81110004
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(523) : GetHmdConnectionStatus : ERROR : sceHmdInternalGetPUVersion : -2129592316(0x81110004)
+<118>[ResArbitrator][IpcServer]GetCallbackDataInt      [1893e](351)  : C->S Callback Get(id[110] type[RESULT] result[true] state[RUNNING] cb[14addf30])
+### gc_gfx_queue_status : in_frame=0 rptr=0x00000000 wptr=0x00000000 IBlist(rptr=0x0000 wptr=0x0000 i_wptr=0x0000)
+<118>[SceShellUI] I/PSM.UI : ** Unload enqueue: SplashScreen.PPSA88360 : SplashScreen
+<118>[SceShellUI] I/PSM.UI : ** Unload enqueue: LaunchFlow.PPSA88360 : LaunchFlow
+<118>[SceShellUI] I/PSM.UI : SceneQ : Unloaded[0.00msec] : SplashScreen.PPSA88360 : SplashScreen
+<118>[SceShellUI] I/PSM.UI : SceneQ : Unloaded[0.00msec] : LaunchFlow.PPSA88360 : LaunchFlow
+<118>[SceLncService] SetControllerFocus(0x00004018)
+<118>[NoticeScreenSkip] NoticeScreenSkipGetFlag(notice_screen_skip_flag= 1, appId= 0x00004018)
+<118>[SceShellCore] VM Stats: RSS 329.7 921.8, kernel 318.8 103.4, wire count 439.1 128.4, swap out 0.0, page table CPU 4454/9216 GPU 139/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  15.0/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  88.1/ 678.2   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  31.1/ 157.7 529.8/2567.8 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   5.6/  25.2 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.5   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.9/ 760.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.2/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   3.1/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   9.6/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  60.4/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.7/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   4.2/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   3.5/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   5.4/  18.5   0.0/   0.0 kstuff.elf
+<118>[SceShellCore] FMEM  23.6/  37.2   0.0/   0.0 shadowmountplus.elf
+<118>MSG AsyncStorageInternal(_getItem, 1275): key(@@.rnps-home-ui:query-cache:cached:experiences:395971800:6976) is not found.
+<118>MSG AsyncStorageInternal(_getItem, 1275): key(@@.rnps-home-ui:query-cache:cached:experiences:395971800:6976) is not found.
+<118>[SceLncService] SetAppFocus(): SetControllerFocus(-1)
+<118>* updateVibrationTriggerEffectWeak:L7883 getVibrationTriggerEffectWeakWhileEmbeddedMicInUse return MBUS_ERROR_NO_PROCESS_INFO. pid = 0xffffffff
+<118>[SceLncService] SetControllerFocus(0x00004018)
+<118>[SceShellUI] I/PSM.UI : [NoDraw] : ClearFrameBuffer=False
+<118>@ mbusGetAudioOutDeviceInfoByBusType:L6145
+<118>[AvControl] ** set scanin(pid=0x3d scaninId = 1 tapPoint = 0x2)
+[si] start pipe[0] 5541s:44us, p:0:1, 57081:0110, 3558:0110, m:0, d:0x0, 0x1110
+<118>MSG AsyncStorageInternal(_getItem, 1275): key(@@.rnps-home-ui:query-cache:cached:experiences:395971800:6979) is not found.
+<118>MSG AsyncStorageInternal(_getItem, 1275): key(@@.rnps-home-ui:query-cache:cached:experiences:395971800:6979) is not found.
+<118>[SceConsoleFeatureFlagChecker] W:\Build\J03247173\vsh\shell\shell_core\console_feature_flag_checker\cffchecker.cpp(810) getCurrentTick: CFFCHECKER_RTRACE::0x80b50001
+<118>[SceLncService] suspendApp() appId={0x00004018}, causeCode={0x36743160}
+<118>[SceLncService] Start suspending PPSA88360
+<118>[SceLncService] 0005531935 (time trace)
+<118>[SceLncService] lockSuspendBlock(0x00004018)
+<118>[SceLncService] lockSuspendBlock: appId={0x00004018}
+<118>[SceLncService] sceApplicationSuspend(0x00004018)
+<118>[Syscore App] Suspend App : 0x4018 PPSA88360
+<118>[Syscore App] Suspend process : 0x7f
+<118>[SceShellUI] I/PSM.UI : OnFocusActiveSceneChanged [AppScreen : ApplicationScreenScene] -> [SplashScreen : SplashScreenScene]
+<118>SetDeviceIndexBehavior: mode=MergeAllConnectedDevice, param=null
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(986) : IsMk3FromUSB : ERROR : [IsMk3FromUSB] sceHmdInternalCheckDeviceModelMk3(): 0x81110004
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(523) : GetHmdConnectionStatus : ERROR : sceHmdInternalGetPUVersion : -2129592316(0x81110004)
+<118>[AvControl] ** stop scanin(pid=0x3d scaninId = 1)
+[si] stop  pipe[0] 5542s: 2us, p:0:1, 57150:0415, 3627:0415, m:0, d:0x0, 0x1110
+### gc_acq_cwsr_suspend_internal : all acqs are suspended in thread group boundary.
+### gc_gfx_queue_status : in_frame=0 rptr=0x00000000 wptr=0x00000000 IBlist(rptr=0x0000 wptr=0x0000 i_wptr=0x0000)
+### gc_suspend_phase0_g2 : pid=127 done.
+[MP1] Disable CNN WAR Global Flag
+[BAPM] universal mode exit
+<118>[Syscore App] Suspend process : 0x7f => 0
+<118>[AvControl] AudioOut: shared (pid=0xffffffff)
+<118>[AvControl] VideoOut: shared (pid=0xffffffff appId=0xffffffff)
+<118>[AvControl] -- app[0](appid=0x4018 attr=0xc2e0057)(GAME RUNNING)(HDR:x HFR:x VR:x VRR:Boost 8K:x) SpecialModeInBg(none) HDCP23(none) supInfo(0x0)
+<118>[AppMgr Trace]: AppId=0x4018 suspended
+<118>[AvControl] onAppSuspend(appid=0x4018)
+<118>[AvControl] app[0](appId=0x4018):suspend
+<118>[AvControl] -- app[0](appid=0x4018 attr=0xc2e0257)(GAME SUSPEND)(HDR:x HFR:x VR:x VRR:Boost 8K:x) SpecialModeInBg(none) HDCP23(none) supInfo(0x0)
+<118>[AvControl] App Event[POST_SUSPEND]: elapse 1[ms] 
+<118>[Syscore App] Suspend App : 0x4018 PPSA88360 => SCE_OK
+<118>[Syscore App]  ExpandCpuSetMode : enable
+<118>[SceLncService] sceApplicationSuspend(0x00004018) returned
+<118>[SceLncService] Completed suspending PPSA88360 (51 msec)
+<118>[SceLncService] 0005531987 (time trace)
+<118>[SceSystemStateMgr] Power Mode Change: NAVIGATION_INACTIVE
+<118>[AvControl] Waiting for the pstate event 
+<118>[Syscore Umd] Set memory pstate (hasRunningGame=0, hasRunningMiniApp=0, isSplashDisplayed=0
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [1893e]( 44)  : Enqueue(id[110], t[1], user[0] state[STOP] pid:[0x3c]) size[1]
+<118>[ResArbitrator][App      ]ChangeState             [1893f]( 49)  : replace id[110] state:['RUNNING'->'STOP']
+<118>[ResArbitrator][IpcServer]Callback                [1893f]( 78)  : S->C Callback Set(id[110] type[RESULT] result[true] state[STOP])
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[110] state[STOP] type[1]) queue.size[0]
+<118>[ResArbitrator][IpcServer]GetCallbackDataInt      [1893e](351)  : C->S Callback Get(id[110] type[RESULT] result[true] state[STOP] cb[14addf30])
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](556)  : -1: Id[  0] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[2(2)] from[DIRECT(0x0)] user[0x0] appId[0x4018]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -3: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[-1,-] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>[AvControl] Waiting for the pstate event : done
+<118>[Syscore Umd] Switching to mode.
+#### GPU reset sequence starts
+_sdma_post_gc_reset(): no need to reset SDMA
+#### GPU reset sequence ends
+<118>[Syscore App] W:/Build/J03247116/sys/internal/syscore/app/process_monitor.h(321) m_currentHwMode=4
+<118>[SceSystemStateMgr] CPU                                     HLT GC     GFX  F    U   ID       FAN BAPM
+<118>[SceSystemStateMgr]  800  800  800  800 3200 3200 3200 3200   0   gen3  500  750 225 00840fd0   0 off
+[NPDRM] del UP9000-PPSA88360_00-RCOMPTEST0000001
+<118>[SceShellCore] VM Stats: RSS 332.9 923.7, kernel 319.1 104.0, wire count 440.8 128.6, swap out 0.0, page table CPU 4457/9216 GPU 139/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  15.0/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  91.3/ 681.3   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  31.1/ 157.7 531.6/2570.4 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   5.7/  25.2 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.5   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.9/ 760.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.2/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   3.1/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   9.6/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  60.4/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.7/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   4.2/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   3.5/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   5.4/  18.5   0.0/   0.0 kstuff.elf
+<118>[SceShellCore] FMEM  23.6/  37.2   0.0/   0.0 shadowmountplus.elf
+<118>[SceLncUtil] blockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={1}
+<118>[SceLncUtil] unblockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={0}
+<118>MSG AutoMounter(int32_t AppIdManager::getPidWithIndex(SceApplicationId, int, pid_t *) 172):
+<118>	appId(0x4018) with index(0) is not registered.
+<118>MSG AutoMounter(int32_t AutoMount::UsbMass::fakeEjection(SceApplicationId) 715):
+<118>	getPidWithIndex(0x4018, 0) returned 0x80f40002.
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [187d6]( 40)  : Enqueue(id[0], t[1], user[0] state[SUSPENDING] appId:[0x4018]) size[1]
+<118>[ResArbitrator][TestId   ]lncEventCallback        [187d6]( 85)  : Target BigAppId[0x4018] APP_SUSPENDED
+<118>[ResArbitrator][App      ]GetExecutable           [1893f](151)  : Target id[0] budgets{vcn[  0] scanin[-] acp[ 0] mem[  0]} prio[2(2)]
+<118>[ResArbitrator][App      ]ChangeState             [1893f]( 49)  : replace id[0] state:['RUNNING'->'SUSPENDING']
+<118>[ResArbitrator][App      ]SetVCNBudget            [1893f](656)  : vcnType is TYPE_UNKNOWN.vcn budget not set.
+<118>[NoticeScreenSkip] remaining time: 53 sec
+<118>[ResArbitrator][RA_main  ]cbResult                [1893f](358)  : Callback id[0] type[RESULT] result[true] state[SUSPENDING]
+<118>[ResArbitrator][TestId   ]raCallback              [1893f](141)  : BigApp[0x4018] Changed state"SUSPENDING"
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[0] state[SUSPENDING] type[1]) queue.size[0]
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](556)  : -1: Id[  0] state[SUSPENDING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[2(2)] from[DIRECT(0x0)] user[0x0] appId[0x4018]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -3: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[-1,-] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>[SceLncService] unlockSuspendBlock: appId={0x00004018}
+<118>[SceLncService] focused app has been suspended. change focus appId={0x00004018} -> nextAppId={0x00000007}
+<118>[AvControl] AudioOut: shared (pid=0x3c)
+<118>[AvControl] VideoOut: shared (pid=0x3c appId=0x7)
+<118>[AvControl] video owner is switched to system(pid=0x3c) 
+<118>[SceShellUI] I/BGLayer : SetBackgroundTransition (Ellapsed 2167msec since last call) ID=81 TransitionType=CustomImageFade Degree=CrossFade NextImageUri= NextBlurImageUri= NextFallbackImageUri= OverlayImageUri=  BasematType=None Retry=False UseImageViewerSequence=False Resize2K=False
+<118>[SceShellUI] I/BGLayer : SetBackgroundTransition (Ellapsed 0msec since last call) ID=82 TransitionType=CustomImageFade Degree=CrossFade NextImageUri=/system_ex/vsh_asset/bg_hub_default.dds NextBlurImageUri= NextFallbackImageUri= OverlayImageUri=  BasematType=None Retry=False UseImageViewerSequence=False Resize2K=False
+<118>[SceShellUI] I/BGLayer : cancelBackgroundTransition ID=81
+<118>[SceShellUI] I/PSM.UI : OnFocusActiveSceneChanged [SplashScreen : SplashScreenScene] -> [Render.NPXS40002 : AppScene]
+<118>SetDeviceIndexBehavior: mode=SpecificUser, param=0x179a0cd8
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(986) : IsMk3FromUSB : ERROR : [IsMk3FromUSB] sceHmdInternalCheckDeviceModelMk3(): 0x81110004
+<118>#LOGIN MGR# : \morpheus_mgr.cpp(523) : GetHmdConnectionStatus : ERROR : sceHmdInternalGetPUVersion : -2129592316(0x81110004)
+<118>[SceShellUI] I/PSM.UI : [FirstDraw] : ClearFrameBuffer=False (Auto=False)
+<118>[SceLncService] SetControllerFocus(0x00000007)
+<118>[PlayGoCore][GameSuspended] begin (PPSA88360)
+<118>[PlayGoCore][GameSuspended] end (PPSA88360, 0x00000000)
+<118>[SceLncService] SetAppFocus(): SetControllerFocus(-1)
+<118>* updateVibrationTriggerEffectWeak:L7883 getVibrationTriggerEffectWeakWhileEmbeddedMicInUse return MBUS_ERROR_NO_PROCESS_INFO. pid = 0xffffffff
+<118>[SceLncService] SetControllerFocus(0x00000007)
+<118>[SceLncService] KillApp() appId={0x00004018} is requested from 0x00000000
+gc: warning: gs1.gui_active not idle upon setting ddid (en=0), wait for idle succeeded (ct=1).
+### gc_gfx_queue_status : in_frame=0 rptr=0x00000010 wptr=0x00000010 IBlist(rptr=0x0000 wptr=0x0000 i_wptr=0x0000)
+<118>[SceLncService] KillApp() appId={0x00004018}, withSuspend={1}, forceKill={0} killReason={0}
+<118>[SceLncService] suspendApp appId={0x00004018} before kill.
+<118>[SceLncService] suspendApp() appId={0x00004018}, causeCode={0x00000006}
+<118>[SceLncService] this app is already suspended. appId={0x00004018}
+<118>[ResArbitrator][TestId   ]lncEventCallback        [187d6](100)  : CRASH KILL_END event->appId[0x4018] event->pid[0xffffffff] 
+<118>[ResArbitrator][QUEUE    ]Enqueue                 [187d6]( 40)  : Enqueue(id[0], t[1], user[0] state[STOP] appId:[0x4018]) size[1]
+<118>[ResArbitrator][App      ]ChangeState             [1893f]( 49)  : replace id[0] state:['SUSPENDING'->'STOP']
+<118>[ResArbitrator][RA_main  ]cbResult                [1893f](358)  : Callback id[0] type[RESULT] result[true] state[STOP]
+<118>[ResArbitrator][TestId   ]raCallback              [1893f](141)  : BigApp[0x4018] Changed state"STOP"
+<118>[ResArbitrator][QUEUE    ]Remove                  [1893f]( 76)  : Remove:(id[0] state[STOP] type[1]) queue.size[0]
+<118>[ResArbitrator][App      ]Dump                    [1893f](547)  : -- Exec Apps *************************
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -1: Id[100] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[  0] prio[0(0)] from[IPMI(0x20b934780)] user[0x0] pid[0x46]
+<118>[ResArbitrator][App      ]Dump                    [1893f](564)  : -2: Id[190] state[RUNNING] vcn[  0] scanin[-] acp[ 0] mem[ 34] prio[10(10)] from[DIRECT(0x0)] user[0x0] pid[0x3b]
+<118>[ResArbitrator][ScanIn   ]Dump                    [1893f](548)  : --ScanIn mode:[1440P] 0[-1,-] 1[-1,-] 2[-1,-] 4K2K[false] Fixed4K[false] A[3,false] Cng[true] 8KReady[false]
+<118>[ResArbitrator][App      ]Dump                    [1893f](868)  : -- No kicking Apps *************************
+<118>[SceLncService] BlockingKill() appId={0x00004018}, titleId={PPSA88360}, is_coredumpFinished={0}, forceKill={0}
+<118>[SceLncService] convertToSysCoreKillReason: {0x00000000}->{0x00000000}
+<118>[Syscore App] Kill App : 0x4018 PPSA88360
+<118>[Syscore App] Kill process: 0x7f
+Terminating pid=127
+### HP3D(pipe1) Agc/Gnm Compositor. proc gen:3 gpu gen:3 vmid:4 
+ +++ num clients 1
+<118>[SceShellCore] VM Stats: RSS 329.8 922.2, kernel 319.0 104.0, wire count 440.7 128.0, swap out 0.0, page table CPU 4464/9216 GPU 143/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  15.0/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  88.1/ 678.2   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  31.1/ 157.6 530.2/2569.0 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   5.7/  25.2 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.5   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.9/ 760.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.2/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   3.1/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   9.6/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  60.4/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.7/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   4.2/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   3.5/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   5.4/  18.5   0.0/   0.0 kstuff.elf
+<118>[SceShellCore] FMEM  23.6/  37.2   0.0/   0.0 shadowmountplus.elf
+<118>[Syscore App] EVFILT_PROC NOTE_EXIT received : pid=0x7f
+<118>[Syscore App] Kill process: 0x7f => 0
+<118>[Syscore App] process delete event : pid=0x7f
+<118>[AppMgr Trace]: pid=0x7f, deleted.
+<118>[Syscore App] Syscore Event Queue Push : SCE_SYSCORE_EVENT_ON_PROCESS_UNLOADED
+<118>[AppMgr] All processes exited
+<118>[Syscore App] Syscore Event Queue Pop : SCE_SYSCORE_EVENT_ON_PROCESS_UNLOADED
+<118>[Syscore App] Syscore Event Queue Push : SCE_SYSCORE_EVENT_ON_APP_UNLOADED
+<118>[Syscore App] Syscore Event Queue Pop : SCE_SYSCORE_EVENT_ON_APP_UNLOADED
+<118>[AvControl] appId 0x4018 record pid num 0 
+<118>[AvControl] onAppKill(appid=0x4018)
+<118>[AvControl] current video owner app is removed (appid=0x4018)
+<118>[AvControl] send telemetry (used buffer size 3792 size 3792)
+<118>[AvControl] App Event[PRE_END]: elapse 1[ms] 
+<118>[AppMgr Trace]: AppId=0x4018  deleted
+<118>[Syscore App]  _appIpcDeleteBudgetCallBack(), budget=6001
+<118>[Syscore App] Kill App : 0xffffffff  => 0
+<118>[Syscore App] blockingKill(0x00004018, 0) complete
+<118>[AppMgr] checkAppTerminated invalid app.
+<118>[Syscore App]  ExpandCpuSetMode : enable
+<118>[SceLncService] start unmountAllForShellCoreInternal()
+<118>[SceLncService] end unmountAllForShellCoreInternal()
+<118>[SceLncUtil] blockAppSuspend: name={SceNpUds}, appId={0x00000006}, refCount={1}
+<118>[SceLncUtil] unblockAppSuspend: name={SceNpUds}, appId={0x00000006}, refCount={0}
+<118>[libSceSaveData] waited 0.000 sec for app kill end1
+<118>[libSceSaveData] waited 0.000 sec for app kill end2
+<118>[SceLncUtil] blockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={1}
+<118>[SceLncUtil] unblockAppSuspend: name={SceSaveData}, appId={0x00000006}, refCount={0}
+<118>[NoticeScreenSkip] don't send telemetry.
+<118>[SceRnpsAppMgr] UnblockAllAppInstall(): PPSA88360(appId=0x00004018)
+<118>[SceLncService] Cleaning /av_contents/content_tmp
+<118>[SceLncService] W:\Build\J03247173\vsh\shell\shell_core\lnc_service\lnc_mapfile.cpp(1798) finalize: LNC_RTRACE::0xffffffff
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[SceLncService] ProcessTerm()
+<118>[AppPromoter] Error: W:\Build\J03247173\vsh\shell\shell_core\app_promoter\app_promoter.cpp at 9642
+<118>[PPSA88360] is not registered
+<118>[sceProcessStarter] ProcessTerm() big/mini app title_id = [PPSA88360] root_dir = [****/sandbox/PPSA88360_000]
+<118>[PlayGoCore][FlexContent][CleanUpFileSystem] begin (PPSA88360)
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[PlayGoCore][FlexContent][CleanUpFileSystem] end (PPSA88360, 0x00000000)
+<118>[SceLncService] ProcessTerm() returned
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002
+<118>[SceLncService] EndAppMount(0x00004018)
+[KERNEL] INFO: end_app_mount 00004018
+[KERNEL] INFO: deleting bigapp: category 0x00000000, container 1
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title already mounted: PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title already mounted: PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title already mounted: PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title already mounted: PPSA99702
+[KERNEL] INFO: budget_appid_clear(4018, 4)=3
+<118>[SceLncService] EndAppMount(0x00004018) returned (28 msec)
+<118>[SceLncService] convertToSysCoreKillReason: {0x00000000}->{0x00000000}
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[SceLncService] onAppExit() appId={0x00004018}
+<118>[SceLncService] this app is already exited. appId={0x00004018}
+<118>[kstuff.elf] Title already mounted: PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title already mounted: PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title already mounted: PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[kstuff.elf] Title already mounted: PPSA88360
+<118>[kstuff.elf] Successfully mounted title PPSA88360 -> /data/homebrew/PPSA88360
+<118>[kstuff.elf] Title already mounted: PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title already mounted: PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title already mounted: WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title already mounted: WIKT00002

@@ -1,0 +1,39 @@
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -129,6 +129,13 @@
+   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
+ 
+   bool CaptureGuestOutput(RawImage& image_out) override;
++
++  // R-comp: synchronous GPU consumer. The mailbox lock and image reference
++  // remain held through the visitor. It must submit on graphics/compute queue
++  // zero of this device, restore the given layout, and await its GPU work
++  // before returning. It must not call a paint-mode API under this lock.
++  bool VisitGuestOutputImage(const std::function<bool(
++      const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout)>& visitor);
+ 
+   void AwaitUISubmissionCompletionFromUIThread(uint64_t submission_index) {
+     ui_submission_tracker_.AwaitSubmissionCompletion(submission_index);
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -454,6 +454,20 @@
+     return 0;
+   }
+   return GetSurfaceTypesSupportedByInstance(vulkan_device_->vulkan_instance()->extensions());
++}
++
++bool VulkanPresenter::VisitGuestOutputImage(const std::function<bool(
++    const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout)>& visitor) {
++  if (!visitor) return false;
++  uint32_t mailbox_index;
++  std::unique_lock<std::mutex> consumer_lock(
++      ConsumeGuestOutput(mailbox_index, nullptr, nullptr));
++  if (mailbox_index == UINT32_MAX) return false;
++  const auto& instance = guest_output_images_[mailbox_index];
++  if (!instance.ever_successfully_refreshed || !instance.image) return false;
++  const std::shared_ptr<GuestOutputImage> image = instance.image;
++  return visitor(vulkan_device_, image->image(), image->extent(),
++                 kGuestOutputFormat, kGuestOutputInternalLayout);
+ }
+ 
+ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {

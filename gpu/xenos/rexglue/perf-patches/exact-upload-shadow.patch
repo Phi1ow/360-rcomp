@@ -1,0 +1,217 @@
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -15,6 +15,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include <rcomp_xenos/page_upload_shadow.h>
+ #include <rex/memory.h>
+ #include <rex/thread/mutex.h>
+ 
+@@ -126,6 +127,9 @@
+   virtual bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
+                                                 uint32_t length_allocations);
+ 
++  // Command-processor-owned snapshot policy, separate from CPU validity bits.
++  rcomp::xenos::PageUploadShadow& upload_shadow() { return upload_shadow_; }
++
+   // Mark the memory range as updated and protect it.
+   void MakeRangeValid(uint32_t start, uint32_t length, bool written_by_gpu);
+ 
+@@ -142,6 +146,7 @@
+ 
+  private:
+   memory::Memory& memory_;
++  rcomp::xenos::PageUploadShadow upload_shadow_;
+ 
+   // Log2 of invalidation granularity (the system page size, but the dependency
+   // on it is not hard - the access callback takes a range as an argument, and
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -31,6 +31,7 @@
+ }
+ 
+ void SharedMemory::InitializeCommon() {
++  upload_shadow_.Reset();
+   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
+   system_page_flags_valid_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
+@@ -48,6 +49,7 @@
+ }
+ 
+ void SharedMemory::ShutdownCommon() {
++  upload_shadow_.Release();
+   FireWatches(0, (kBufferSize - 1) >> page_size_log2_, false);
+   assert_true(global_watches_.empty());
+   // No watches now, so no references to the pools accessible by guest threads -
+@@ -90,6 +92,7 @@
+ }
+ 
+ void SharedMemory::InvalidateAllPages() {
++  upload_shadow_.Reset();
+   auto global_lock = global_critical_region_.Acquire();
+ 
+   std::fill(system_page_flags_valid_.begin(), system_page_flags_valid_.end(), uint64_t(0));
+@@ -106,6 +109,7 @@
+ }
+ 
+ void SharedMemory::ClearCache() {
++  upload_shadow_.Reset();
+   // Keeping GPU-written data, so "invalidated by GPU".
+   FireWatches(0, (kBufferSize - 1) >> page_size_log2_, true);
+   // No watches now, so no references to the pools accessible by guest threads -
+@@ -262,6 +266,10 @@
+   uint32_t end = start + length - 1;
+   uint32_t page_first = start >> page_size_log2_;
+   uint32_t page_last = end >> page_size_log2_;
++
++  // A CPU snapshot no longer describes the destination after a GPU write.
++  // Invalidate entire touched pages, including partial resolves and memexport.
++  upload_shadow_.InvalidateRange(page_first, page_last - page_first + 1);
+ 
+   // Trigger modification callbacks so, for instance, resolved data is loaded to
+   // the texture.
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -27,6 +27,13 @@
+                     "Use sparse shared memory on Vulkan")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// Opt-in until a gameplay before/after run proves both pixels and speed.
++// This still copies CPU data to staging, but skips redundant GPU transfers.
++REXCVAR_DEFINE_INT32(rcomp_shared_memory_shadow_mib, 0, "GPU/Vulkan",
++                    "Exact shared-memory upload snapshots; 0 disables, max 128 MiB")
++    .range(0, 128)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+@@ -42,6 +49,11 @@
+ 
+ bool VulkanSharedMemory::Initialize() {
+   InitializeCommon();
++  const int32_t shadow_mib = std::clamp(REXCVAR_GET(rcomp_shared_memory_shadow_mib), 0, 128);
++  if (!upload_shadow().Configure(uint32_t(1) << page_size_log2(),
++                                 kBufferSize >> page_size_log2(), size_t(shadow_mib) << 20)) {
++    REXGPU_WARN("Shared memory: upload snapshot allocation failed; using normal uploads");
++  }
+ 
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+@@ -170,6 +182,7 @@
+ }
+ 
+ void VulkanSharedMemory::Shutdown(bool from_destructor) {
++  upload_shadow().Release();
+   upload_buffer_pool_.reset();
+ 
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+@@ -270,22 +283,14 @@
+ 
+ bool VulkanSharedMemory::UploadRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
+-  if (upload_page_ranges.empty()) {
+-    return true;
+-  }
+-  // upload_page_ranges are sorted, use them to determine the range for the
+-  // ordering barrier.
+-  Use(Usage::kTransferDestination,
+-      std::make_pair(upload_page_ranges.front().first << page_size_log2(),
+-                     (upload_page_ranges.back().first + upload_page_ranges.back().second -
+-                      upload_page_ranges.front().first)
+-                         << page_size_log2()));
+-  command_processor_.SubmitBarriers(true);
++  if (upload_page_ranges.empty()) return true;
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+   uint64_t submission_current = command_processor_.GetCurrentSubmission();
+-  bool successful = true;
++  bool successful = true, transfer_started = false;
+   upload_regions_.clear();
+   VkBuffer upload_buffer_previous = VK_NULL_HANDLE;
++  std::vector<rcomp::xenos::PageUploadShadow::PageRange> changed_runs;
++  const uint32_t page_bytes = uint32_t(1) << page_size_log2();
+   for (auto upload_range : upload_page_ranges) {
+     uint32_t upload_range_start = upload_range.first;
+     uint32_t upload_range_length = upload_range.second;
+@@ -293,35 +298,64 @@
+       VkBuffer upload_buffer;
+       VkDeviceSize upload_buffer_offset, upload_buffer_size;
+       uint8_t* upload_buffer_mapping = upload_buffer_pool_->RequestPartial(
+-          submission_current, upload_range_length << page_size_log2(),
+-          size_t(1) << page_size_log2(), upload_buffer, upload_buffer_offset, upload_buffer_size);
++          submission_current, upload_range_length << page_size_log2(), page_bytes,
++          upload_buffer, upload_buffer_offset, upload_buffer_size);
+       if (upload_buffer_mapping == nullptr) {
+         REXGPU_ERROR("Shared memory: Failed to get a Vulkan upload buffer");
+         successful = false;
+         break;
+       }
++      // Rearm invalidation before reading, exactly like the original uploader.
++      // Compare the actual staged bytes, so concurrent CPU writers do not cause
++      // a second read to disagree with the copy or its remembered snapshot.
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+       std::memcpy(upload_buffer_mapping,
+                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
+                   upload_buffer_size);
+-      if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+-        assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+-        command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+-                                       uint32_t(upload_regions_.size()), upload_regions_.data());
+-        upload_regions_.clear();
++      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
++      if (upload_shadow().enabled()) {
++        upload_shadow().CollectChangedRuns(upload_range_start, upload_buffer_pages,
++                                           upload_buffer_mapping, changed_runs);
+       }
+-      upload_buffer_previous = upload_buffer;
+-      VkBufferCopy& upload_region = upload_regions_.emplace_back();
+-      upload_region.srcOffset = upload_buffer_offset;
+-      upload_region.dstOffset = VkDeviceSize(upload_range_start << page_size_log2());
+-      upload_region.size = upload_buffer_size;
+-      uint32_t upload_buffer_pages = uint32_t(upload_buffer_size >> page_size_log2());
++      const size_t changed_count = upload_shadow().enabled() ? changed_runs.size() : 1;
++      if (changed_count) {
++        if (!transfer_started) {
++          // Keep conservative original bounds, but insert a transfer barrier
++          // only when at least one actual vkCmdCopyBuffer region exists.
++          Use(Usage::kTransferDestination,
++              std::make_pair(upload_page_ranges.front().first << page_size_log2(),
++                  (upload_page_ranges.back().first + upload_page_ranges.back().second -
++                   upload_page_ranges.front().first) << page_size_log2()));
++          command_processor_.SubmitBarriers(true);
++          transfer_started = true;
++        }
++        if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
++          assert_true(upload_buffer_previous != VK_NULL_HANDLE);
++          command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
++                                         uint32_t(upload_regions_.size()), upload_regions_.data());
++          upload_regions_.clear();
++        }
++        upload_buffer_previous = upload_buffer;
++        for (size_t changed_index = 0; changed_index < changed_count; ++changed_index) {
++          const auto changed = upload_shadow().enabled() ? changed_runs[changed_index] :
++              rcomp::xenos::PageUploadShadow::PageRange(upload_range_start, upload_buffer_pages);
++          const uint32_t staging_page = changed.first - upload_range_start;
++          VkBufferCopy& upload_region = upload_regions_.emplace_back();
++          upload_region.srcOffset = upload_buffer_offset + VkDeviceSize(staging_page) * page_bytes;
++          upload_region.dstOffset = VkDeviceSize(changed.first) * page_bytes;
++          upload_region.size = VkDeviceSize(changed.second) * page_bytes;
++          if (upload_shadow().enabled()) {
++            for (uint32_t page = 0; page < changed.second; ++page) {
++              upload_shadow().Remember(changed.first + page,
++                  upload_buffer_mapping + size_t(staging_page + page) * page_bytes);
++            }
++          }
++        }
++      }
+       upload_range_start += upload_buffer_pages;
+       upload_range_length -= upload_buffer_pages;
+     }
+-    if (!successful) {
+-      break;
+-    }
++    if (!successful) break;
+   }
+   if (!upload_regions_.empty()) {
+     assert_true(upload_buffer_previous != VK_NULL_HANDLE);

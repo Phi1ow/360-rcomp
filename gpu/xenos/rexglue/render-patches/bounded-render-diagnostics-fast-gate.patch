@@ -1,0 +1,60 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4029,7 +4029,7 @@
+                              shader_32bit_index_dma, 0, viewport_info, used_texture_mask,
+                              normalized_depth_control, normalized_color_mask);
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-  {
++  if (::rcomp::xenos::RenderDiagnostics().InWindow(GetCurrentFrame())) {
+     using namespace ::rcomp::xenos;
+     draw_util::Scissor diag_scissor;
+     draw_util::GetScissor(regs, diag_scissor);
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1164,7 +1164,7 @@
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+ 
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-  {
++  if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+     using namespace ::rcomp::xenos;
+     uint32_t base, row_length, rows, pitch;
+     resolve_info.GetCopyEdramTileSpan(base, row_length, rows, pitch);
+@@ -1504,7 +1504,7 @@
+                   sizeof(last_update_framebuffer_attachments_));
+       last_update_framebuffer_ = framebuffer;
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-      {
++      if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+         using namespace ::rcomp::xenos;
+         RenderDiagnosticKey key;
+         key.Add(framebuffer->host_extent.width); key.Add(framebuffer->host_extent.height);
+@@ -5140,7 +5140,7 @@
+           for (uint32_t j = 0; j < transfer_invocation_rectangle_count; ++j) {
+             const Transfer::Rectangle& transfer_rectangle = transfer_invocation_rectangles[j];
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-            {
++            if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+               using namespace ::rcomp::xenos;
+               RenderDiagnosticKey key;
+               key.Add(dest_rt_key.key);
+@@ -6131,7 +6131,7 @@
+       vulkan_rt.SetTemporarySortIndex(rt_sort_index++);
+     }
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-    {
++    if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+       using namespace ::rcomp::xenos;
+       RenderDiagnosticKey key;
+       key.Add(rt_key.key); key.Add(dump_base); key.Add(dump_row_length_used); key.Add(dump_rows); key.Add(dump_pitch);
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -222,7 +222,7 @@
+       last_usage_ = usage;
+     }
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-    {
++    if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+       using namespace ::rcomp::xenos;
+       RenderDiagnosticKey key;
+       key.Add(src_stage_mask); key.Add(dst_stage_mask); key.Add(src_access_mask); key.Add(dst_access_mask);

@@ -1,0 +1,26 @@
+{
+  "scope": "original PPC calendar and thread fixture through R-comp production TitleRuntime",
+  "title_id": "PPSA88360",
+  "target": "<PS5_IP>",
+  "ports": {"ftp": 2120, "elf": 9021, "klogs": 3232, "temporary_controller": 9111},
+  "package": "build/platform-ps5-title-calendar-threads/dist/PPSA88360",
+  "console": {
+    "platform_checks": 13,
+    "calendar_threads_checks": 20,
+    "guest_entry_returns": 6,
+    "guest_return_code": "0x00000070",
+    "ppc_steps_per_entry": 45,
+    "title_begin_lines": 1,
+    "title_end_lines": 1,
+    "title_end_status": 0,
+    "timeout_seconds": 60,
+    "runner_watchdog_seconds": 45,
+    "required_evidence": ["binary identity", "manifest upload readback", "rcomp_title.log", "klog.txt", "title stopped", "controller closed", "compiled input hashes unchanged"]
+  },
+  "host": {"runtime_rehearsal_phases": 6, "calendar_threads_checks": 20, "windows_differential_cases": 4005},
+  "shadowmount_manual_sha256": "034051a8d408c3abefd603d13c022c32df6cf189b76fdecb789af12c876acac8",
+  "source_policy": "R-comp only; obsolete Emu-3 bundle excluded",
+  "console_execution": "NOT TESTED",
+  "graphics": "NOT TESTED",
+  "gta_iv_execution": "NOT TESTED"
+}

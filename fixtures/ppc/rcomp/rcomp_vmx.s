@@ -1,0 +1,19 @@
+# VMX (AltiVec, not VMX128): lvx/stvx element order and arithmetic.
+test_vmx_lvx_stvx_roundtrip:
+  #_ MEMORY_IN 10001000 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+  #_ REGISTER_IN r4 0x10001000
+  #_ REGISTER_IN r5 0x10001010
+  lvx v1, 0, r4
+  vaddubm v2, v1, v1
+  stvx v2, 0, r5
+  blr
+  #_ REGISTER_OUT v1 [00010203, 04050607, 08090A0B, 0C0D0E0F]
+  #_ REGISTER_OUT v2 [00020406, 080A0C0E, 10121416, 181A1C1E]
+  #_ MEMORY_OUT 10001010 00 02 04 06 08 0a 0c 0e 10 12 14 16 18 1a 1c 1e
+
+test_vaddfp:
+  #_ REGISTER_IN v1 [3F800000, 40000000, 40400000, 40800000]
+  #_ REGISTER_IN v2 [3F000000, 3FC00000, 40200000, 40600000]
+  vaddfp v3, v1, v2
+  blr
+  #_ REGISTER_OUT v3 [3FC00000, 40600000, 40B00000, 40F00000]

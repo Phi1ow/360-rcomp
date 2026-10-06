@@ -1,0 +1,13 @@
+build/
+__pycache__/
+*.pyc
+# User-provided disc images and executables must never enter Git.
+*.iso
+*.xex
+rcomp-ps5-kit-*.tar.gz
+# Local PS5 test runs (kit binaries, raw logs before review)
+/ps5-kit/
+/ps5-logs/
+
+# Firmware 9.40 system libraries supplied locally (proprietary; never commit)
+/9.40/

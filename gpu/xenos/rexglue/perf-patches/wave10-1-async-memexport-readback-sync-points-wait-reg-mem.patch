@@ -1,0 +1,715 @@
+diff -ruN a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+--- a/include/rex/graphics/command_processor.h	2026-10-03 22:37:39.956005400 +0200
++++ b/include/rex/graphics/command_processor.h	2026-10-03 22:37:39.977114100 +0200
+@@ -172,6 +172,14 @@
+   virtual void PrepareForWait();
+   virtual void ReturnFromWait();
+ 
++  // R-comp (wave 10): a point of the command stream where the guest can learn that earlier GPU work has completed (a packet
++  // that writes guest memory or raises an interrupt: its opcode; a scratch register write-back; a WAIT_REG_MEM poll that did not
++  // match) or where the CPU writes since the previous kick were just applied to the GPU's view of memory. Called by the command
++  // processor thread between packets, only while rcomp_sync_points_armed_ is set (the backend arms it).
++  static constexpr uint32_t kRcompSyncPointInvalidation = 0x100;
++  static constexpr uint32_t kRcompSyncPointScratch = 0x101;
++  virtual void RcompSyncPoint(uint32_t kind) {}
++
+   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
+   virtual void OnPrimaryBufferEnd() {}
+   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
+@@ -280,6 +288,9 @@
+   // name (for explicit-override compatibility).
+   const char* legacy_readback_memexport_cvar_name_ = nullptr;
+ 
++  // R-comp (wave 10): see RcompSyncPoint.
++  bool rcomp_sync_points_armed_ = false;
++
+  private:
+   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
+   reg::DC_LUT_PWL_DATA gamma_ramp_pwl_rgb_[128][3] = {};
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h	2026-10-03 22:37:40.194074500 +0200
++++ b/include/rex/graphics/vulkan/command_processor.h	2026-10-03 22:37:40.215077200 +0200
+@@ -403,6 +403,8 @@
+   void OnGammaRamp256EntryTableValueWritten() override;
+   void OnGammaRampPWLValueWritten() override;
+   void OnPrimaryBufferEnd() override;
++  void PrepareForWait() override;
++  void RcompSyncPoint(uint32_t kind) override;
+ 
+   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                  uint32_t frontbuffer_height) override;
+@@ -1097,6 +1099,74 @@
+ 
+   // Temporary storage for memexport stream constants used in the draw.
+   std::vector<draw_util::MemExportRange> memexport_ranges_;
++
++  // R-comp (wave 10): asynchronous memexport read-back (rcomp_memexport_readback_async). The SDK's read-back makes the command
++  // processor wait for the whole GPU queue whenever its double-buffered fast path has no completed copy of the same range (a range
++  // first seen, or written again before the GPU got there), which serializes the command processor and the GPU (Halo 3: 12.6 waits
++  // and 20 ms a frame at 4K). Here every memexport draw records its copy into a host-visible ring and goes on; the copy reaches the
++  // guest memory, in draw order, as soon as its submission is seen completed, and at the latest (blocking) where the guest could
++  // otherwise observe the GPU's progress first (mode 1) or where CPU writes make the GPU re-read pages the copy covers (both modes).
++  struct RcompMxChunk {
++    VkBuffer buffer = VK_NULL_HANDLE;
++    VkDeviceMemory memory = VK_NULL_HANDLE;
++    uint8_t* mapping = nullptr;
++    VkDeviceSize memory_size = 0;
++    bool coherent = true;
++    uint32_t used = 0;
++    uint32_t pending = 0;  // records not yet retired that live in this chunk
++  };
++  struct RcompMxPending {
++    uint64_t submission;
++    uint64_t frame;
++    uint32_t chunk;
++    uint32_t offset;
++    uint32_t size;
++    uint32_t range_count;  // the next range_count entries of rcomp_mx_ranges_
++  };
++  enum RcompMxTrigger : uint32_t {
++    kRcompMxTriggerInvalidation,
++    kRcompMxTriggerInterrupt,
++    kRcompMxTriggerEventShd,
++    kRcompMxTriggerEventExt,
++    kRcompMxTriggerEventZpd,
++    kRcompMxTriggerMemWrite,
++    kRcompMxTriggerRegToMem,
++    kRcompMxTriggerCondWrite,
++    kRcompMxTriggerScratch,
++    kRcompMxTriggerWaitRegMem,
++    kRcompMxTriggerCapacity,
++    kRcompMxTriggerSdkPath,
++    kRcompMxTriggerShutdown,
++    kRcompMxTriggerCount,
++  };
++  struct RcompMxStats {
++    uint64_t draws = 0, bytes = 0, retired_polled = 0, retired_flushed = 0, lag_frames = 0, sdk_fallbacks = 0;
++    uint64_t max_pending = 0, chunks = 0;
++    uint64_t flushes[kRcompMxTriggerCount] = {}, blocking[kRcompMxTriggerCount] = {}, blocking_us[kRcompMxTriggerCount] = {};
++    // The SDK paths (mode 0): fast path copies read from an older slot, fast path fallbacks to the full path, full path waits.
++    uint64_t sdk_fast_hits = 0, sdk_fast_to_full = 0, sdk_full_waits = 0, sdk_full_wait_us = 0;
++  };
++  bool RcompMxRecord(uint32_t total_size);
++  void RcompMxRetireCompleted();
++  void RcompMxFlush(RcompMxTrigger trigger);
++  void RcompMxNoteCpuInvalidation(uint32_t address_first, uint32_t address_last);
++  void RcompMxUpdateArm();
++  void RcompMxReport();
++  void RcompMxShutdown();
++  int32_t rcomp_mx_mode_ = 0;
++  std::vector<RcompMxChunk> rcomp_mx_chunks_;
++  uint32_t rcomp_mx_chunk_current_ = 0;
++  std::deque<RcompMxPending> rcomp_mx_pending_;
++  std::deque<draw_util::MemExportRange> rcomp_mx_ranges_;
++  // Physical bytes [first, last] that the pending records may cover (conservative, reset when none is pending).
++  uint32_t rcomp_mx_extent_first_ = UINT32_MAX;
++  uint32_t rcomp_mx_extent_last_ = 0;
++  // A CPU invalidation since the last sync point hit pages a pending record covers.
++  bool rcomp_mx_cpu_overlap_ = false;
++  bool rcomp_mx_retiring_ = false;
++  bool rcomp_mx_flushing_ = false;
++  RcompMxStats rcomp_mx_stats_;
++  uint64_t rcomp_mx_last_report_frame_ = 0;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
+diff -ruN a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp	2026-10-03 22:37:40.074076100 +0200
++++ b/src/graphics/command_processor.cpp	2026-10-03 22:37:40.095074900 +0200
+@@ -81,6 +81,14 @@
+     .range(1, 100000)
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// R-comp (wave 10): a WAIT_REG_MEM whose condition does not hold sleeps wait/0x100 ms (1 ms or more) between polls while vsync is on, so a value that
++// arrives a few microseconds later still costs the command processor a whole sleep. With N > 0 the command processor first polls (yielding) for up to
++// N microseconds per WAIT_REG_MEM packet before it falls back to the sleep. Only the timing of the wait changes: the packet still ends when the condition holds.
++REXCVAR_DEFINE_INT32(rcomp_wait_reg_mem_spin_us, 0, "GPU",
++                     "WAIT_REG_MEM: poll (yielding) for up to this many microseconds before sleeping between polls (0 = sleep at once, the SDK's behavior)")
++    .range(0, 100000)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+                     "Compile shaders and create pipelines asynchronously in background "
+                     "threads. This reduces stutter but may cause brief visual artifacts while "
+@@ -381,6 +389,9 @@
+   if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
+     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
+     if ((1 << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
++      if (rcomp_sync_points_armed_) {
++        RcompSyncPoint(kRcompSyncPointScratch);
++      }
+       // Enabled - write to address.
+       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
+       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
+@@ -649,6 +660,10 @@
+     ::rcomp::xenos::ProfScope rcomp_prof_invalidate(12);
+     memory_->InvalidateWatchedPhysicalMemory();
+   }
++  // R-comp (wave 10): the CPU writes just applied may cover data a GPU write produced that the guest memory does not hold yet.
++  if (rcomp_sync_points_armed_) {
++    RcompSyncPoint(kRcompSyncPointInvalidation);
++  }
+ 
+   // Execute commands!
+   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
+@@ -824,6 +839,23 @@
+     }
+   }
+ 
++  // R-comp (wave 10): the packets that write guest memory or raise an interrupt are where the guest learns that earlier work is done.
++  if (rcomp_sync_points_armed_) {
++    switch (opcode) {
++      case PM4_INTERRUPT:
++      case PM4_REG_TO_MEM:
++      case PM4_MEM_WRITE:
++      case PM4_COND_WRITE:
++      case PM4_EVENT_WRITE_SHD:
++      case PM4_EVENT_WRITE_EXT:
++      case PM4_EVENT_WRITE_ZPD:
++        RcompSyncPoint(opcode);
++        break;
++      default:
++        break;
++    }
++  }
++
+   bool result = false;
+   switch (opcode) {
+     case PM4_ME_INIT:
+@@ -963,6 +995,49 @@
+   return result;
+ }
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++namespace {
++// R-comp (wave 10): WAIT_REG_MEM by polled target, cumulative (profile builds; the command processor thread only), logged as
++// RCOMP-WAITREGMEM lines every 300 swaps.
++struct RcompWaitRegMemStat {
++  uint64_t key = 0;  // bit 32: memory poll; low 32 bits: the register index, or the physical address with its endian bits
++  uint32_t function = 0, ref = 0, mask = 0, last = 0;
++  uint64_t calls = 0, unmatched = 0, sleeps = 0, spins = 0, wait_ns = 0;
++};
++constexpr size_t kRcompWaitRegMemStats = 16;
++RcompWaitRegMemStat rcomp_wait_reg_mem_stats[kRcompWaitRegMemStats];
++// The last entry also collects every target beyond the first 15.
++RcompWaitRegMemStat* RcompWaitRegMemStatFor(uint64_t key) {
++  for (size_t i = 0; i + 1 < kRcompWaitRegMemStats; ++i) {
++    RcompWaitRegMemStat& stat = rcomp_wait_reg_mem_stats[i];
++    if (!stat.calls) {
++      stat.key = key;
++      return &stat;
++    }
++    if (stat.key == key) {
++      return &stat;
++    }
++  }
++  return &rcomp_wait_reg_mem_stats[kRcompWaitRegMemStats - 1];
++}
++void RcompWaitRegMemReport(uint32_t swaps) {
++  for (size_t i = 0; i < kRcompWaitRegMemStats; ++i) {
++    const RcompWaitRegMemStat& stat = rcomp_wait_reg_mem_stats[i];
++    if (!stat.calls) {
++      continue;
++    }
++    std::fprintf(stderr,
++                 "RCOMP-WAITREGMEM swaps=%u target=%s:0x%X%s func=%u ref=0x%X mask=0x%X calls=%llu unmatched=%llu "
++                 "sleeps=%llu spins=%llu wait_us=%llu last=0x%X\n",
++                 swaps, (stat.key >> 32) ? "mem" : "reg", uint32_t(stat.key),
++                 i + 1 == kRcompWaitRegMemStats ? "+others" : "", stat.function, stat.ref, stat.mask,
++                 (unsigned long long)stat.calls, (unsigned long long)stat.unmatched, (unsigned long long)stat.sleeps,
++                 (unsigned long long)stat.spins, (unsigned long long)(stat.wait_ns / 1000), stat.last);
++  }
++}
++}  // namespace
++#endif
++
+ bool CommandProcessor::ExecutePacketType3_ME_INIT(memory::RingBuffer* reader, uint32_t packet,
+                                                   uint32_t count) {
+   // initialize CP's micro-engine
+@@ -1033,6 +1108,11 @@
+ 
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  if (counter_ && (counter_ % 300) == 0) {
++    RcompWaitRegMemReport(counter_);
++  }
++#endif
+   ++counter_;
+   return true;
+ }
+@@ -1067,6 +1147,29 @@
+   struct RcompWaitFlag { RcompWaitFlag() { rcomp_cp_wait[5] = 1; } ~RcompWaitFlag() { rcomp_cp_wait[5] = 0; } } rcomp_wait_flag;
+ 
+ #endif
++  // R-comp (wave 10): optional polling before the sleep, the sync point of a wait that does not match at once, profile statistics.
++  static const int32_t rcomp_spin_us = REXCVAR_GET(rcomp_wait_reg_mem_spin_us);
++  bool rcomp_synced = false;
++  std::chrono::steady_clock::time_point rcomp_spin_deadline{};
++  bool rcomp_spin_started = false;
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  RcompWaitRegMemStat* const rcomp_stat =
++      RcompWaitRegMemStatFor((uint64_t(is_memory ? 1 : 0) << 32) | poll_reg_addr);
++  const auto rcomp_wait_t0 = std::chrono::steady_clock::now();
++  bool rcomp_first_poll = true;
++  rcomp_stat->function = wait_info & 0x7;
++  rcomp_stat->ref = ref;
++  rcomp_stat->mask = mask;
++  ++rcomp_stat->calls;
++  struct RcompWaitRegMemTime {
++    RcompWaitRegMemStat* stat;
++    std::chrono::steady_clock::time_point t0;
++    ~RcompWaitRegMemTime() {
++      stat->wait_ns += uint64_t(
++          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
++    }
++  } rcomp_wait_time{rcomp_stat, rcomp_wait_t0};
++#endif
+   bool matched = false;
+   do {
+     uint32_t value = 0;
+@@ -1110,9 +1213,44 @@
+         matched = true;
+         break;
+     }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++    rcomp_stat->last = value;
++    if (rcomp_first_poll) {
++      rcomp_first_poll = false;
++      rcomp_stat->unmatched += matched ? 0 : 1;
++    }
++#endif
+     if (!matched) {
++      // R-comp (wave 10): what the wait is for may depend on GPU work the backend has not made visible to the guest yet.
++      if (rcomp_sync_points_armed_ && !rcomp_synced) {
++        rcomp_synced = true;
++        RcompSyncPoint(PM4_WAIT_REG_MEM);
++        continue;  // poll again
++      }
++      // R-comp (wave 10): poll for a while before the millisecond sleep (rcomp_wait_reg_mem_spin_us).
++      if (wait >= 0x100 && rcomp_spin_us > 0 && REXCVAR_GET(vsync)) {
++        const auto now = std::chrono::steady_clock::now();
++        if (!rcomp_spin_started) {
++          rcomp_spin_started = true;
++          rcomp_spin_deadline = now + std::chrono::microseconds(rcomp_spin_us);
++        }
++        if (now < rcomp_spin_deadline) {
++#if RCOMP_XENOS_PROFILE_TIMINGS
++          ++rcomp_stat->spins;
++#endif
++          rex::thread::MaybeYield();
++          rex::thread::SyncMemory();
++          if (!worker_running_) {
++            return false;
++          }
++          continue;
++        }
++      }
+       // Wait.
+       if (wait >= 0x100) {
++#if RCOMP_XENOS_PROFILE_TIMINGS
++        ++rcomp_stat->sleeps;
++#endif
+         PrepareForWait();
+         if (!REXCVAR_GET(vsync)) {
+           // User wants it fast and dangerous.
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp	2026-10-03 22:37:40.309372500 +0200
++++ b/src/graphics/vulkan/command_processor.cpp	2026-10-03 22:37:40.332018100 +0200
+@@ -207,6 +207,19 @@
+     .range(16, 16384)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// R-comp (wave 10): the SDK's memexport read-back (readback_memexport, on by default, with readback_memexport_fast) waits for the whole
++// GPU queue whenever its double-buffered fast path finds no completed copy of the same range; Halo 3 at 4K: 12.6 such waits and 20.4 ms
++// a frame, the GPU idle 23.7 ms a frame. 1: every memexport draw records its copy into a host-visible ring without waiting; the data
++// reaches the guest memory, in draw order, when its submission is seen completed, and at the latest (waiting) before a packet through
++// which the guest can observe the GPU's progress (interrupt, EVENT_WRITE_SHD/EXT/ZPD, MEM_WRITE, REG_TO_MEM, COND_WRITE, scratch
++// write-back, an unmatched WAIT_REG_MEM) or before CPU writes make the GPU re-read pages a pending copy covers. 2: the same without the
++// waits at those packets (the data lags by at most the frames in flight, as the SDK fast path's previous-copy data does).
++REXCVAR_DEFINE_INT32(rcomp_memexport_readback_async, 0, "GPU/Vulkan",
++                     "Memexport read-back without waiting for the GPU: 0 = SDK paths, 1 = asynchronous, visible before the guest's "
++                     "synchronization packets, 2 = asynchronous, visible on completion only")
++    .range(0, 2)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+@@ -781,6 +794,7 @@
+                                                     uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
+   if (!invalidated_by_gpu) {
+     static_cast<VulkanCommandProcessor*>(context)->InvalidateVertexBufferStatesInRange(address_first, address_last);
++    static_cast<VulkanCommandProcessor*>(context)->RcompMxNoteCpuInvalidation(address_first, address_last);
+   }
+ }
+ 
+@@ -1097,6 +1111,10 @@
+     return false;
+   }
+   vertex_buffer_watch_handle_ = shared_memory_->RegisterGlobalWatch(VertexBufferWatchThunk, this);
++  rcomp_mx_mode_ = REXCVAR_GET(rcomp_memexport_readback_async);
++  std::fprintf(stderr, "RCOMP-MEMEXPORT-RB config mode=%d readback_memexport=%u fast=%u\n", int(rcomp_mx_mode_),
++               unsigned(IsReadbackMemexportEnabled(REXCVAR_GET(vulkan_readback_memexport))),
++               unsigned(REXCVAR_GET(readback_memexport_fast)));
+ 
+   primitive_processor_ =
+       std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
+@@ -2117,6 +2135,7 @@
+ 
+ void VulkanCommandProcessor::ShutdownContext() {
+   AwaitAllQueueOperationsCompletion();
++  RcompMxShutdown();
+   StopAsyncSubmitThread();
+   InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+@@ -2611,6 +2630,7 @@
+       }
+     }
+   }
++  RcompMxReport();
+   if (shared_memory_) {
+     shared_memory_->RcompStaleAudit();
+   }
+@@ -3944,6 +3964,285 @@
+   }
+ }
+ 
++void VulkanCommandProcessor::PrepareForWait() {
++  CommandProcessor::PrepareForWait();
++  // R-comp (wave 10): the command processor is about to idle or sleep: hand the completed memexport copies to the guest (no wait).
++  if (!rcomp_mx_pending_.empty()) {
++    CheckSubmissionFenceAndDeviceLoss(0);
++  }
++}
++
++void VulkanCommandProcessor::RcompSyncPoint(uint32_t kind) {
++  if (kind == kRcompSyncPointInvalidation) {
++    if (rcomp_mx_cpu_overlap_) {
++      rcomp_mx_cpu_overlap_ = false;
++      RcompMxFlush(kRcompMxTriggerInvalidation);
++    }
++  } else if (rcomp_mx_mode_ == 1 && !rcomp_mx_pending_.empty()) {
++    RcompMxTrigger trigger;
++    switch (kind) {
++      case xenos::PM4_INTERRUPT:
++        trigger = kRcompMxTriggerInterrupt;
++        break;
++      case xenos::PM4_EVENT_WRITE_SHD:
++        trigger = kRcompMxTriggerEventShd;
++        break;
++      case xenos::PM4_EVENT_WRITE_EXT:
++        trigger = kRcompMxTriggerEventExt;
++        break;
++      case xenos::PM4_EVENT_WRITE_ZPD:
++        trigger = kRcompMxTriggerEventZpd;
++        break;
++      case xenos::PM4_MEM_WRITE:
++        trigger = kRcompMxTriggerMemWrite;
++        break;
++      case xenos::PM4_REG_TO_MEM:
++        trigger = kRcompMxTriggerRegToMem;
++        break;
++      case xenos::PM4_COND_WRITE:
++        trigger = kRcompMxTriggerCondWrite;
++        break;
++      case xenos::PM4_WAIT_REG_MEM:
++        trigger = kRcompMxTriggerWaitRegMem;
++        break;
++      default:
++        trigger = kRcompMxTriggerScratch;
++        break;
++    }
++    RcompMxFlush(trigger);
++  }
++  RcompMxUpdateArm();
++}
++
++void VulkanCommandProcessor::RcompMxUpdateArm() {
++  rcomp_sync_points_armed_ = rcomp_mx_cpu_overlap_ || (rcomp_mx_mode_ == 1 && !rcomp_mx_pending_.empty());
++}
++
++void VulkanCommandProcessor::RcompMxNoteCpuInvalidation(uint32_t address_first, uint32_t address_last) {
++  if (rcomp_mx_pending_.empty() || rcomp_mx_cpu_overlap_ || address_last < rcomp_mx_extent_first_ ||
++      address_first > rcomp_mx_extent_last_) {
++    return;
++  }
++  for (const draw_util::MemExportRange& range : rcomp_mx_ranges_) {
++    const uint64_t first = uint64_t(range.base_address_dwords) << 2;
++    const uint64_t end = first + range.size_bytes;  // exclusive
++    if (range.size_bytes && first <= address_last && end > address_first) {
++      // Pages holding data a pending copy has not brought to the guest memory yet will be uploaded from the guest memory:
++      // the copies must land first (RcompSyncPoint(kRcompSyncPointInvalidation), right after the invalidation).
++      rcomp_mx_cpu_overlap_ = true;
++      rcomp_sync_points_armed_ = true;
++      return;
++    }
++  }
++}
++
++bool VulkanCommandProcessor::RcompMxRecord(uint32_t total_size) {
++  constexpr uint32_t kChunkSize = 4u << 20;
++  constexpr size_t kMaxChunks = 32;
++  constexpr uint32_t kAlignment = 256;
++  if (!total_size || total_size > kChunkSize || memexport_ranges_.empty()) {
++    return false;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  const uint32_t alignment =
++      std::max(kAlignment, uint32_t(std::min(vulkan_device->properties().nonCoherentAtomSize, VkDeviceSize(65536))));
++  const auto fits = [&](const RcompMxChunk& chunk) {
++    return rex::align(chunk.used, alignment) + uint64_t(total_size) <= kChunkSize;
++  };
++  if (rcomp_mx_chunks_.empty() || !fits(rcomp_mx_chunks_[rcomp_mx_chunk_current_])) {
++    bool found = false;
++    const size_t chunk_count = rcomp_mx_chunks_.size();
++    for (size_t step = 1; step <= chunk_count; ++step) {
++      const uint32_t i = uint32_t((rcomp_mx_chunk_current_ + step) % chunk_count);
++      if (!rcomp_mx_chunks_[i].pending) {
++        rcomp_mx_chunks_[i].used = 0;
++        rcomp_mx_chunk_current_ = i;
++        found = true;
++        break;
++      }
++    }
++    if (!found && chunk_count < kMaxChunks) {
++      RcompMxChunk chunk;
++      uint32_t memory_type = UINT32_MAX;
++      if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
++              vulkan_device, kChunkSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, ui::vulkan::util::MemoryPurpose::kReadback,
++              chunk.buffer, chunk.memory, &memory_type, &chunk.memory_size)) {
++        return false;
++      }
++      void* mapping = nullptr;
++      if (dfn.vkMapMemory(device, chunk.memory, 0, VK_WHOLE_SIZE, 0, &mapping) != VK_SUCCESS) {
++        dfn.vkDestroyBuffer(device, chunk.buffer, nullptr);
++        dfn.vkFreeMemory(device, chunk.memory, nullptr);
++        return false;
++      }
++      chunk.mapping = static_cast<uint8_t*>(mapping);
++      chunk.coherent = (vulkan_device->memory_types().host_coherent & (uint32_t(1) << memory_type)) != 0;
++      rcomp_mx_chunks_.push_back(chunk);
++      rcomp_mx_chunk_current_ = uint32_t(rcomp_mx_chunks_.size() - 1);
++      rcomp_mx_stats_.chunks = rcomp_mx_chunks_.size();
++      found = true;
++    }
++    if (!found) {
++      // Every chunk holds copies not yet retired: wait for them (this ends the submission that holds the draw).
++      RcompMxFlush(kRcompMxTriggerCapacity);
++      if (!rcomp_mx_pending_.empty() || !BeginSubmission(true)) {
++        return false;
++      }
++      rcomp_mx_chunk_current_ = 0;
++      rcomp_mx_chunks_[0].used = 0;
++    }
++  }
++  const uint32_t chunk_index = rcomp_mx_chunk_current_;
++  RcompMxChunk& chunk = rcomp_mx_chunks_[chunk_index];
++  const uint32_t offset = rex::align(chunk.used, alignment);
++  chunk.used = offset + total_size;
++
++  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
++  SubmitBarriers(true);
++  uint32_t copy_offset = offset;
++  for (const draw_util::MemExportRange& range : memexport_ranges_) {
++    VkBufferCopy region = {};
++    region.srcOffset = VkDeviceSize(range.base_address_dwords) << 2;
++    region.dstOffset = copy_offset;
++    region.size = range.size_bytes;
++    deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), chunk.buffer, 1, &region);
++    copy_offset += range.size_bytes;
++    rcomp_mx_ranges_.push_back(range);
++    const uint32_t first = range.base_address_dwords << 2;
++    rcomp_mx_extent_first_ = std::min(rcomp_mx_extent_first_, first);
++    rcomp_mx_extent_last_ = std::max(rcomp_mx_extent_last_, first + std::max(range.size_bytes, 1u) - 1);
++  }
++  PushBufferMemoryBarrier(chunk.buffer, offset, total_size, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
++                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
++  rcomp_mx_pending_.push_back(
++      {GetCurrentSubmission(), frame_current_, chunk_index, offset, total_size, uint32_t(memexport_ranges_.size())});
++  ++chunk.pending;
++  ++rcomp_mx_stats_.draws;
++  rcomp_mx_stats_.bytes += total_size;
++  rcomp_mx_stats_.max_pending = std::max(rcomp_mx_stats_.max_pending, uint64_t(rcomp_mx_pending_.size()));
++  RcompMxUpdateArm();
++  return true;
++}
++
++void VulkanCommandProcessor::RcompMxRetireCompleted() {
++  if (rcomp_mx_retiring_) {
++    return;
++  }
++  rcomp_mx_retiring_ = true;
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  while (!rcomp_mx_pending_.empty() && rcomp_mx_pending_.front().submission <= submission_completed_) {
++    const RcompMxPending record = rcomp_mx_pending_.front();
++    RcompMxChunk& chunk = rcomp_mx_chunks_[record.chunk];
++    if (!chunk.coherent) {
++      const VkDeviceSize atom = std::max(vulkan_device->properties().nonCoherentAtomSize, VkDeviceSize(1));
++      VkMappedMemoryRange memory_range = {};
++      memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++      memory_range.memory = chunk.memory;
++      memory_range.offset = VkDeviceSize(record.offset) / atom * atom;
++      memory_range.size =
++          std::min((VkDeviceSize(record.offset) + record.size + atom - 1) / atom * atom, chunk.memory_size) -
++          memory_range.offset;
++      vulkan_device->functions().vkInvalidateMappedMemoryRanges(vulkan_device->device(), 1, &memory_range);
++    }
++    // The GPU's copy of these bytes is the data itself (the draw wrote it there): no CPU write is noted, so the
++    // GPU does not upload over newer memexport results of later draws.
++    const uint8_t* source = chunk.mapping + record.offset;
++    for (uint32_t i = 0; i < record.range_count; ++i) {
++      const draw_util::MemExportRange range = rcomp_mx_ranges_.front();
++      rcomp_mx_ranges_.pop_front();
++      std::memcpy(memory_->TranslatePhysical(range.base_address_dwords << 2), source, range.size_bytes);
++      source += range.size_bytes;
++    }
++    --chunk.pending;
++    rcomp_mx_stats_.lag_frames += frame_current_ - record.frame;
++    if (rcomp_mx_flushing_) {
++      ++rcomp_mx_stats_.retired_flushed;
++    } else {
++      ++rcomp_mx_stats_.retired_polled;
++    }
++    rcomp_mx_pending_.pop_front();
++  }
++  if (rcomp_mx_pending_.empty()) {
++    rcomp_mx_extent_first_ = UINT32_MAX;
++    rcomp_mx_extent_last_ = 0;
++    rcomp_mx_cpu_overlap_ = false;
++  }
++  rcomp_mx_retiring_ = false;
++  RcompMxUpdateArm();
++}
++
++void VulkanCommandProcessor::RcompMxFlush(RcompMxTrigger trigger) {
++  ++rcomp_mx_stats_.flushes[trigger];
++  if (rcomp_mx_pending_.empty()) {
++    return;
++  }
++  const uint64_t newest = rcomp_mx_pending_.back().submission;
++  rcomp_mx_flushing_ = true;
++  if (newest > submission_completed_) {
++    ++rcomp_mx_stats_.blocking[trigger];
++    const auto t0 = std::chrono::steady_clock::now();
++    // Ends the open submission when it holds the copies; retires what completed.
++    CheckSubmissionFenceAndDeviceLoss(newest);
++    rcomp_mx_stats_.blocking_us[trigger] +=
++        uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
++  }
++  RcompMxRetireCompleted();
++  rcomp_mx_flushing_ = false;
++}
++
++void VulkanCommandProcessor::RcompMxReport() {
++  const RcompMxStats& s = rcomp_mx_stats_;
++  if ((!rcomp_mx_mode_ && !s.sdk_fast_hits && !s.sdk_full_waits) || frame_current_ < rcomp_mx_last_report_frame_ + 300) {
++    return;
++  }
++  rcomp_mx_last_report_frame_ = frame_current_;
++  const uint64_t retired = s.retired_polled + s.retired_flushed;
++  std::fprintf(stderr,
++               "RCOMP-MEMEXPORT-RB frame=%llu mode=%d draws=%llu bytes=%llu retired_polled=%llu retired_flushed=%llu "
++               "avg_lag_frames=%.2f pending=%zu max_pending=%llu chunks=%llu sdk_fallbacks=%llu sdk_fast_hits=%llu "
++               "sdk_fast_to_full=%llu sdk_full_waits=%llu sdk_full_wait_ms=%.1f\n",
++               (unsigned long long)frame_current_, int(rcomp_mx_mode_), (unsigned long long)s.draws,
++               (unsigned long long)s.bytes, (unsigned long long)s.retired_polled, (unsigned long long)s.retired_flushed,
++               retired ? double(s.lag_frames) / double(retired) : 0.0, rcomp_mx_pending_.size(),
++               (unsigned long long)s.max_pending, (unsigned long long)s.chunks, (unsigned long long)s.sdk_fallbacks,
++               (unsigned long long)s.sdk_fast_hits, (unsigned long long)s.sdk_fast_to_full,
++               (unsigned long long)s.sdk_full_waits, double(s.sdk_full_wait_us) * 1e-3);
++  if (rcomp_mx_mode_) {
++    static const char* const kNames[kRcompMxTriggerCount] = {"inval", "irq",     "shd",      "ext",       "zpd",
++                                                              "memw",  "r2m",     "condw",    "scratch",   "waitreg",
++                                                              "capacity", "sdk", "shutdown"};
++    char line[1024];
++    int n = std::snprintf(line, sizeof(line), "RCOMP-MEMEXPORT-RB-FLUSH frame=%llu (flushes/blocking/ms)",
++                          (unsigned long long)frame_current_);
++    for (uint32_t i = 0; i < kRcompMxTriggerCount && n > 0 && n < int(sizeof(line)); ++i) {
++      n += std::snprintf(line + n, sizeof(line) - n, " %s=%llu/%llu/%.1f", kNames[i], (unsigned long long)s.flushes[i],
++                         (unsigned long long)s.blocking[i], double(s.blocking_us[i]) * 1e-3);
++    }
++    std::fprintf(stderr, "%s\n", line);
++  }
++}
++
++void VulkanCommandProcessor::RcompMxShutdown() {
++  RcompMxRetireCompleted();
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  for (RcompMxChunk& chunk : rcomp_mx_chunks_) {
++    if (chunk.mapping) {
++      dfn.vkUnmapMemory(device, chunk.memory);
++    }
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, chunk.buffer);
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, chunk.memory);
++  }
++  rcomp_mx_chunks_.clear();
++  rcomp_mx_pending_.clear();
++  rcomp_mx_ranges_.clear();
++  rcomp_mx_cpu_overlap_ = false;
++  RcompMxUpdateArm();
++}
++
+ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+                                            const uint32_t* host_address, uint32_t dword_count) {
+   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+@@ -4978,7 +5277,16 @@
+       memexport_total_size += memexport_range.size_bytes;
+     }
+     if (memexport_total_size) {
+-      if (REXCVAR_GET(readback_memexport_fast)) {
++      if (rcomp_mx_mode_ != 0) {
++        if (!RcompMxRecord(memexport_total_size)) {
++          // The SDK's synchronous path, after every earlier pending copy (the guest memory receives the copies in draw order).
++          ++rcomp_mx_stats_.sdk_fallbacks;
++          RcompMxFlush(kRcompMxTriggerSdkPath);
++          if (BeginSubmission(true)) {
++            IssueDraw_MemexportReadbackFullPath(memexport_total_size);
++          }
++        }
++      } else if (REXCVAR_GET(readback_memexport_fast)) {
+         IssueDraw_MemexportReadbackFastPath(memexport_total_size);
+       } else {
+         IssueDraw_MemexportReadbackFullPath(memexport_total_size);
+@@ -5164,7 +5472,12 @@
+                           VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_HOST_READ_BIT);
+ 
+-  if (!AwaitAllQueueOperationsCompletion()) {
++  ++rcomp_mx_stats_.sdk_full_waits;
++  const auto rcomp_full_wait_t0 = std::chrono::steady_clock::now();
++  const bool rcomp_full_awaited = AwaitAllQueueOperationsCompletion();
++  rcomp_mx_stats_.sdk_full_wait_us += uint64_t(
++      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - rcomp_full_wait_t0).count());
++  if (!rcomp_full_awaited) {
+     REXGPU_ERROR("Failed to await completion of Vulkan memexport readback");
+     dfn.vkDestroyBuffer(device, readback_buffer, nullptr);
+     dfn.vkFreeMemory(device, readback_memory, nullptr);
+@@ -5307,10 +5620,12 @@
+   }
+   const uint32_t next_index = (write_index + 1) % kReadbackSlots;
+   if (read_index == kReadbackSlots) {
++    ++rcomp_mx_stats_.sdk_fast_to_full;
+     IssueDraw_MemexportReadbackFullPath(total_size);
+     readback.current_index = next_index;
+     return true;
+   }
++  ++rcomp_mx_stats_.sdk_fast_hits;
+ 
+   VkMappedMemoryRange readback_memory_range = {};
+   readback_memory_range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+@@ -6225,6 +6540,10 @@
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+   RcompGpuProfileCollect(vulkan_device, submission_completed_);
+ #endif
++  // R-comp (wave 10): the memexport copies of the submissions now completed reach the guest memory.
++  if (!rcomp_mx_pending_.empty()) {
++    RcompMxRetireCompleted();
++  }
+ 
+   // Reclaim semaphores.
+   while (!submissions_in_flight_semaphores_.empty()) {

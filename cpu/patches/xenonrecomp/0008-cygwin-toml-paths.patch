@@ -1,0 +1,6 @@
+diff --git a/thirdparty/tomlplusplus/include/toml++/impl/preprocessor.hpp b/thirdparty/tomlplusplus/include/toml++/impl/preprocessor.hpp
+--- a/thirdparty/tomlplusplus/include/toml++/impl/preprocessor.hpp
++++ b/thirdparty/tomlplusplus/include/toml++/impl/preprocessor.hpp
+@@ -252,1 +252,1 @@
+-#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__) || defined(__CYGWIN__)
++#if !defined(__CYGWIN__) && (defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__))

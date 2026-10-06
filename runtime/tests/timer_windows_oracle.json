@@ -1,0 +1,92 @@
+{
+ "oracle": "Windows ntdll",
+ "platform": "Windows-11-10.0.26200-SP0",
+ "rows": [
+  {
+   "case": "create invalid type 2",
+   "status": "0xC00000F2"
+  },
+  {
+   "case": "create notification",
+   "status": "0x00000000",
+   "initially_signalled": false
+  },
+  {
+   "case": "set notification relative 10 ms",
+   "status": "0x00000000",
+   "previous_state": 0,
+   "signalled_at_once": false
+  },
+  {
+   "case": "notification after due",
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "notification stays signalled",
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "re-set signalled notification",
+   "status": "0x00000000",
+   "previous_state": 1,
+   "signalled_after_set": false
+  },
+  {
+   "case": "cancel before due",
+   "status": "0x00000000",
+   "current_state": 0,
+   "wait_after_cancel_status": "0x00000102"
+  },
+  {
+   "case": "cancel after fire keeps state",
+   "status": "0x00000000",
+   "current_state": 1,
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "cancel idle timer",
+   "status": "0x00000000",
+   "current_state": 1
+  },
+  {
+   "case": "absolute due in the past",
+   "status": "0x00000000",
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "negative period",
+   "status": "0xC00000F4"
+  },
+  {
+   "case": "resume requested",
+   "status": "0x00000000",
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "set without previous state",
+   "status": "0x00000000"
+  },
+  {
+   "case": "create synchronization",
+   "status": "0x00000000"
+  },
+  {
+   "case": "synchronization first wait",
+   "wait_status": "0x00000000"
+  },
+  {
+   "case": "synchronization auto reset",
+   "wait_status": "0x00000102"
+  },
+  {
+   "case": "periodic synchronization fires repeatedly",
+   "first_status": "0x00000000",
+   "second_status": "0x00000000"
+  },
+  {
+   "case": "cancel periodic",
+   "status": "0x00000000",
+   "wait_after_cancel_status": "0x00000102"
+  }
+ ]
+}

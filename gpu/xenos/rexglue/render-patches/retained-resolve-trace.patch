@@ -1,0 +1,28 @@
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
+@@ -1145,6 +1146,17 @@
+     return true;
+   }
+ 
++  {  // bring-up tracing: resolve parameters
++    static std::atomic<uint32_t> resolves{0};
++    const uint32_t n = resolves.fetch_add(1);
++    if (n < 80 || (n % 2000) == 0)
++      fprintf(stderr, "RCOMP-RESOLVE direct_ok=%llu direct_fallback=%llu #%u w=%u h=%u dest_base=0x%08X extent=0x%08X+0x%X src_select=%u color_base=%u path=%d clear_c=%d clear_d=%d fmt=%u\n", (unsigned long long)direct_resolve_success_count_, (unsigned long long)direct_resolve_fallback_count_, n,
++              resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8, resolve_info.copy_dest_base,
++              resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
++              unsigned(resolve_info.rb_copy_control.copy_src_select), unsigned(resolve_info.color_edram_info.base_tiles),
++              int(GetPath()), int(resolve_info.IsClearingColor()), int(resolve_info.IsClearingDepth()),
++              unsigned(resolve_info.copy_dest_info.copy_dest_format));
++  }
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();

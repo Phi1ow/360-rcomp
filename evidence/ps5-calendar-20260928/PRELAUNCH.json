@@ -1,0 +1,36 @@
+{
+  "utc": "2026-09-28T20:43:36.915487+00:00",
+  "title_id": "PPSA88360",
+  "build_id": "38d8473ebfa9282d",
+  "files": {
+    "eboot.bin": {
+      "bytes": 1319636,
+      "sha256": "5f2cb9e9cc62bdb87c89843719c7e7036f25761c873cc1f24c677ffb87dac66d"
+    },
+    "fixtures/xex/rcomp_title.xex": {
+      "bytes": 24576,
+      "sha256": "dceef0374cbfa35a848a3c7c86449087f7d3a44e14c9107412b15c35dcad8b53"
+    },
+    "manifest.sha256": {
+      "bytes": 436,
+      "sha256": "069c547fa2762f6db0de79f52efab7f696530d10bce8126bc272798ffb4a7620"
+    },
+    "sce_module/libc.prx": {
+      "bytes": 1284674,
+      "sha256": "e6ff45d16adf687855cc3b33b0c8a4132b6504360b221e0a34c7e99fb3ba0036"
+    },
+    "sce_sys/icon0.png": {
+      "bytes": 1496,
+      "sha256": "fb4cddfb45fef707eb6e678e1bd389160b34a1d774ec4618c6232f38e1658bab"
+    },
+    "sce_sys/param.json": {
+      "bytes": 767,
+      "sha256": "ebf6fab9b1faf039bc3b82b45ceff3ed8ce32a71af4e582017c0467627ea777f"
+    }
+  },
+  "sources_manifest_sha256": "036325787f0ef591e319ad5cde9ee00a26e2dbf4a8e7acb394fa4f0b604f5094",
+  "compiled_input_files": 606,
+  "console_execution": "NOT TESTED",
+  "graphics": "NOT TESTED",
+  "source_policy": "R-comp only; obsolete Emu-3 bundle excluded"
+}

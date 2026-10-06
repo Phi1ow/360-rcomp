@@ -1,0 +1,260 @@
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -722,6 +722,8 @@
+     kDumpPushConstantPitches,
+     // May be changed multiple times for the same source.
+     kDumpPushConstantOffsets,
++    // R-comp: bit i set - the samples with guest sample index i are dumped (the others are not written).
++    kDumpPushConstantSampleMask,
+ 
+     kDumpPushConstantCount,
+   };
+@@ -808,9 +810,33 @@
+                               bool draw_resolution_scaled);
+ 
+   // Writes contents of host render targets within rectangles from
+-  // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
++  // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_. R-comp: sample_mask (bit i = guest sample
++  // index i) limits the dump of multisampled targets to the samples the resolve copy will read;
++  // 0xF dumps everything.
+   bool DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+-                         uint32_t dump_pitch);
++                         uint32_t dump_pitch, uint32_t sample_mask = 0xF);
++  // R-comp: the guest samples of the dump that a copy with this sample selection reads.
++  static uint32_t GetDumpSampleMask(xenos::CopySampleSelect copy_sample_select) {
++    switch (copy_sample_select) {
++      case xenos::CopySampleSelect::k0:
++        return 0x1;
++      case xenos::CopySampleSelect::k1:
++        return 0x2;
++      case xenos::CopySampleSelect::k2:
++        return 0x4;
++      case xenos::CopySampleSelect::k3:
++        return 0x8;
++      case xenos::CopySampleSelect::k01:
++        return 0x3;
++      case xenos::CopySampleSelect::k23:
++        return 0xC;
++      default:
++        return 0xF;
++    }
++  }
++  // R-comp cvars read at initialization (rcomp_early_rt_barrier, rcomp_dump_sample_mask).
++  bool early_rt_barrier_ = false;
++  bool dump_sample_mask_enabled_ = false;
+ 
+   bool gamma_render_target_as_unorm16_ = false;
+ 
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -43,6 +43,18 @@
+ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+                       "Vulkan render target implementation path")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++// R-comp: after dumping the render targets for a resolve, return them to their drawing layout at once
++// (before the resolve copy is recorded) instead of when the next draw needs them, so the barrier does
++// not wait for the copy and the draws of the next pass can overlap it.
++REXCVAR_DEFINE_BOOL(rcomp_early_rt_barrier, true, "GPU/Vulkan",
++                    "Transition dumped render targets back to the drawing layout before the resolve copy")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp: dump only the guest samples that the resolve copy reads (a copy that selects one sample of a
++// 2x or 4x surface reads one of the two or four).
++REXCVAR_DEFINE_BOOL(rcomp_dump_sample_mask, true, "GPU/Vulkan",
++                    "Dump only the multisample samples that the resolve copy will read")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ // DEFINE_string(
+ //     render_target_path_vulkan, "",
+@@ -219,6 +231,13 @@
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+   const ui::vulkan::VulkanDevice::Properties& device_properties = vulkan_device->properties();
++
++  early_rt_barrier_ = REXCVAR_GET(rcomp_early_rt_barrier);
++  dump_sample_mask_enabled_ = REXCVAR_GET(rcomp_dump_sample_mask);
++  if (early_rt_barrier_ || dump_sample_mask_enabled_) {
++    std::fprintf(stderr, "RCOMP-RESOLVE-OPTS early_rt_barrier=%u dump_sample_mask=%u\n", unsigned(early_rt_barrier_),
++                 unsigned(dump_sample_mask_enabled_));
++  }
+ 
+   bool fsi_path_supported =
+       (device_properties.fragmentShaderSampleInterlock ||
+@@ -1190,9 +1209,13 @@
+     command_processor_.RcompFlushDrawRun();
+     uint32_t span_base, span_row_length, span_rows, span_pitch;
+     resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
++    // ss sample select, ms MSAA of the copied surface, rf its format, dp/dh destination pitch and height, sw red-blue
++    // swap, en endian, eb exponent bias, dn number format.
++    const auto& rcomp_edram =
++        resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+     std::fprintf(stderr,
+                  "RCOMP-EV R n=%llu f=%llu src=%u span=%u+%ux%u/%u dest=0x%08X extent=0x%08X+0x%X w=%u h=%u fmt=%u "
+-                 "clr=%u%u copy=%u\n",
++                 "clr=%u%u copy=%u ss=%u ms=%u rf=%u dp=%u dh=%u sw=%u en=%u eb=%d dn=%u\n",
+                  (unsigned long long)command_processor_.RcompNextEventSeq(),
+                  (unsigned long long)command_processor_.GetCurrentFrame(),
+                  unsigned(resolve_info.rb_copy_control.copy_src_select), span_base, span_row_length, span_rows,
+@@ -1200,7 +1223,12 @@
+                  resolve_info.copy_dest_extent_length, resolve_info.coordinate_info.width_div_8 * 8,
+                  resolve_info.height_div_8 * 8, unsigned(resolve_info.copy_dest_info.copy_dest_format),
+                  unsigned(resolve_info.IsClearingColor()), unsigned(resolve_info.IsClearingDepth()),
+-                 unsigned(resolve_info.copy_dest_extent_length != 0));
++                 unsigned(resolve_info.copy_dest_extent_length != 0),
++                 unsigned(resolve_info.copy_dest_coordinate_info.copy_sample_select), unsigned(rcomp_edram.msaa_samples),
++                 unsigned(rcomp_edram.format), unsigned(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32,
++                 unsigned(resolve_info.copy_dest_coordinate_info.height_aligned_div_32) * 32,
++                 unsigned(resolve_info.copy_dest_info.copy_dest_swap), unsigned(resolve_info.copy_dest_info.copy_dest_endian),
++                 int(resolve_info.copy_dest_info.copy_dest_exp_bias), unsigned(resolve_info.copy_dest_info.copy_dest_number));
+   }
+ #endif
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+@@ -1264,7 +1292,11 @@
+           uint32_t dump_rows;
+           uint32_t dump_pitch;
+           resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+-          if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch)) {
++          if (!DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
++                                 dump_sample_mask_enabled_
++                                     ? GetDumpSampleMask(
++                                           resolve_info.copy_dest_coordinate_info.copy_sample_select)
++                                     : 0xF)) {
+             REXGPU_ERROR("VulkanRenderTargetCache: Failed to dump host render targets for resolve");
+             return false;
+           }
+@@ -1496,10 +1528,14 @@
+                                      reg::RB_DEPTHCONTROL normalized_depth_control,
+                                      uint32_t normalized_color_mask, const Shader& vertex_shader,
+                                      uint32_t overwrite_candidate_rts) {
+-  if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
+-                                 normalized_color_mask, vertex_shader, overwrite_candidate_rts)) {
+-    return false;
+-  }
++  {
++    rcomp::xenos::FineScope rcomp_fine_base(78, command_processor_.RcompFine());
++    if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
++                                   normalized_color_mask, vertex_shader, overwrite_candidate_rts)) {
++      return false;
++    }
++  }
++  rcomp::xenos::FineScope rcomp_fine_post(80, command_processor_.RcompFine());
+ 
+   auto rb_surface_info = register_file().Get<reg::RB_SURFACE_INFO>();
+ 
+@@ -5830,6 +5866,10 @@
+   builder.addMemberName(type_push_constants, kDumpPushConstantOffsets, "offsets");
+   builder.addMemberDecoration(type_push_constants, kDumpPushConstantOffsets, spv::DecorationOffset,
+                               int(sizeof(uint32_t) * kDumpPushConstantOffsets));
++  builder.addMemberName(type_push_constants, kDumpPushConstantSampleMask, "sample_mask");
++  builder.addMemberDecoration(type_push_constants, kDumpPushConstantSampleMask,
++                              spv::DecorationOffset,
++                              int(sizeof(uint32_t) * kDumpPushConstantSampleMask));
+   builder.addDecoration(type_push_constants, spv::DecorationBlock);
+   spv::Id push_constants =
+       builder.createVariable(spv::NoPrecision, spv::StorageClassPushConstant, type_push_constants,
+@@ -5992,6 +6032,37 @@
+     }
+   }
+ 
++  if (source_is_multisampled) {
++    // R-comp: the samples that the resolve copy does not read are not written (the push constant is a
++    // bit mask of guest sample indices, 0xF for all; the guest index of a 4x sample is the host index,
++    // that of a 2x sample is the parity of the sample row).
++    spv::Id guest_sample_index =
++        key.msaa_samples >= xenos::MsaaSamples::k4X
++            ? source_sample_id
++            : builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_y,
++                                  builder.makeUintConstant(1));
++    id_vector_temp.clear();
++    id_vector_temp.push_back(builder.makeIntConstant(kDumpPushConstantSampleMask));
++    spv::Id sample_mask_constant = builder.createLoad(
++        builder.createAccessChain(spv::StorageClassPushConstant, push_constants, id_vector_temp),
++        spv::NoPrecision);
++    spv::Id sample_wanted = builder.createBinOp(
++        spv::OpINotEqual, builder.makeBoolType(),
++        builder.createBinOp(
++            spv::OpBitwiseAnd, type_uint,
++            builder.createBinOp(spv::OpShiftRightLogical, type_uint, sample_mask_constant,
++                                guest_sample_index),
++            builder.makeUintConstant(1)),
++        builder.makeUintConstant(0));
++    spv::Block& sample_skipped_block = builder.makeNewBlock();
++    spv::Block& sample_wanted_block = builder.makeNewBlock();
++    builder.createSelectionMerge(&sample_wanted_block, spv::SelectionControlMaskNone);
++    builder.createConditionalBranch(sample_wanted, &sample_wanted_block, &sample_skipped_block);
++    builder.setBuildPoint(&sample_skipped_block);
++    builder.makeReturn(false);
++    builder.setBuildPoint(&sample_wanted_block);
++  }
++
+   // Load the source, and pack the value into one or two 32-bit integers.
+   spv::Id packed[2] = {};
+   spv::Builder::TextureParameters source_texture_parameters = {};
+@@ -6354,11 +6425,16 @@
+ 
+   // Dedicated direct resolve dispatches are staged behind the same preflight;
+   // keep using the existing dump path until source-image direct shaders land.
+-  return DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);
++  return DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
++                           dump_sample_mask_enabled_
++                               ? GetDumpSampleMask(
++                                     resolve_info.copy_dest_coordinate_info.copy_sample_select)
++                               : 0xF);
+ }
+ 
+ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
+-                                                uint32_t dump_rows, uint32_t dump_pitch) {
++                                                uint32_t dump_rows, uint32_t dump_pitch,
++                                                uint32_t sample_mask) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
+ 
+   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
+@@ -6421,7 +6497,7 @@
+   VkDescriptorSet last_source_descriptor_set = VK_NULL_HANDLE;
+   DumpPitches last_pitches;
+   DumpOffsets last_offsets;
+-  bool pitches_bound = false, offsets_bound = false;
++  bool pitches_bound = false, offsets_bound = false, sample_mask_bound = false;
+   bool all_pipelines_available = true;
+   for (const DumpInvocation& invocation : dump_invocations_) {
+     const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
+@@ -6483,6 +6559,12 @@
+       command_buffer.CmdVkPushConstants(pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                         sizeof(uint32_t) * kDumpPushConstantPitches,
+                                         sizeof(last_pitches), &last_pitches);
++    }
++    if (!sample_mask_bound) {
++      sample_mask_bound = true;
++      command_buffer.CmdVkPushConstants(pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
++                                        sizeof(uint32_t) * kDumpPushConstantSampleMask,
++                                        sizeof(sample_mask), &sample_mask);
+     }
+ 
+     DumpOffsets offsets;
+@@ -6532,6 +6614,26 @@
+     }
+     MarkEdramBufferModified();
+   }
++  if (early_rt_barrier_) {
++    // The dumped targets go back to their drawing layout now, before the copy that follows is recorded, so
++    // that the barrier waits for the dumps only (the draws that need the targets next do not wait for the copy).
++    for (const DumpInvocation& invocation : dump_invocations_) {
++      auto& vulkan_rt = *static_cast<VulkanRenderTarget*>(invocation.rectangle.render_target);
++      const bool is_depth = vulkan_rt.key().is_depth;
++      VkPipelineStageFlags rt_dst_stage_mask;
++      VkAccessFlags rt_dst_access_mask;
++      VkImageLayout rt_new_layout;
++      VulkanRenderTarget::GetDrawUsage(is_depth, &rt_dst_stage_mask, &rt_dst_access_mask, &rt_new_layout);
++      command_processor_.PushImageMemoryBarrier(
++          vulkan_rt.image(),
++          ui::vulkan::util::InitializeSubresourceRange(
++              is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) : VK_IMAGE_ASPECT_COLOR_BIT),
++          vulkan_rt.current_stage_mask(), rt_dst_stage_mask, vulkan_rt.current_access_mask(), rt_dst_access_mask,
++          vulkan_rt.current_layout(), rt_new_layout);
++      vulkan_rt.SetUsage(rt_dst_stage_mask, rt_dst_access_mask, rt_new_layout);
++    }
++    command_processor_.SubmitBarriers(true);
++  }
+   return all_pipelines_available;
+ }
+ 

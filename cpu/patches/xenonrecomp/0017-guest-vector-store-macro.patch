@@ -1,0 +1,41 @@
+diff -ru a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-10-01 22:59:47.686838600 +0200
++++ b/XenonRecomp/recompiler.cpp	2026-10-01 22:59:47.708817200 +0200
+@@ -1752,14 +1752,11 @@
+ 
+     case PPC_INST_STVX:
+     case PPC_INST_STVX128:
+-        print("\tsimde_mm_store_si128((simde__m128i*)(base + ((");
++        // One macro for the whole store (patch 0017): the runtime sees the old and the new bytes of the line.
++        print("\tPPC_VSTORE128(((");
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32) & ~0xF)), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]), v(insn.operands[0]));
+-        print("\tPPC_WRITE_NOTIFY((");
+-        if (insn.operands[1] != 0)
+-            print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32) & ~0xF, 16);", r(insn.operands[2]));
++        println("{}.u32) & ~0xF), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]), v(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_STW:
+diff -ru a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-10-01 22:59:47.730829500 +0200
++++ b/XenonUtils/ppc_context.h	2026-10-01 22:59:47.756901300 +0200
+@@ -114,6 +114,16 @@
+ #define PPC_WRITE_NOTIFY(x, size) ((void)0)
+ #endif
+ 
++// R-comp patch 0017. A whole aligned 16-byte vector store (stvx, stvx128): `ea` is the
++// aligned guest address, `value` the byte-swapped __m128i. The default is the store
++// followed by PPC_WRITE_NOTIFY, as patch 0016 emitted it; a runtime that wants to know
++// whether the store changed anything overrides the macro and compares the old bytes.
++#ifndef PPC_VSTORE128
++#define PPC_VSTORE128(ea, value) do { const uint32_t ppc_vstore_ea_ = (ea); \
++    simde_mm_store_si128((simde__m128i*)(base + ppc_vstore_ea_), (value)); \
++    PPC_WRITE_NOTIFY(ppc_vstore_ea_, 16); } while (0)
++#endif
++
+ #ifndef PPC_MM_STORE_U64
+ #define PPC_MM_STORE_U64(x, y)  PPC_STORE_U64(x, y)
+ #endif

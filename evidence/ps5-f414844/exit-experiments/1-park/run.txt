@@ -1,0 +1,17 @@
+00:39:18 status before: ok idle
+00:39:19 $ ps5_ftp_kit.py push D:/emu 4/exp-kit\1-park\PPSA88360 -> exit 0
+00:39:19   deleting previous /data/homebrew/PPSA88360
+00:39:19     /data/homebrew/PPSA88360/eboot.bin (37354 bytes)
+00:39:19     /data/homebrew/PPSA88360/manifest.sha256 (339 bytes)
+00:39:19     /data/homebrew/PPSA88360/sce_module/libc.prx (1284674 bytes)
+00:39:19     /data/homebrew/PPSA88360/sce_sys/icon0.png (1496 bytes)
+00:39:19     /data/homebrew/PPSA88360/sce_sys/param.json (734 bytes)
+00:39:19   OK: 5 files in /data/homebrew/PPSA88360, sizes checked; WARNING: eboot.bin is -rw-rw-rw- (no execute bit, the FTP server cannot chmod); send tools/ps5_chmod_title to the ELF loader before launching (see docs/PS5_TEST_KIT.md). Launch PPSA88360 on the console now.
+00:39:23 chmod: chmodtitle: /data/homebrew/PPSA88360 fixed=8 failed=0
+00:39:26 launch: ok launched PPSA88360 result=0x00002018 via lncUtilApp/foreground as user 395971800 (the console reports the title running)
+00:39:28 running: ok procs app=8216 title=PPSA88360 count=1 pids=125
+00:39:30 end line in the log after 2s; closing: ok killed PPSA88360: PPSA88360 is gone (app id 8216, 1 processes killed, result 0x80940004)
+00:39:33 status after: ok idle
+00:39:36 $ ps5_ftp_kit.py pull --out D:/emu 4/ps5-logs-exp\1-park -> exit 0
+00:39:36   downloaded /data/homebrew/PPSA88360/rcomp_title.log -> D:/emu 4/ps5-logs-exp\1-park\rcomp_title.log
+00:39:36   verdict: end status=0

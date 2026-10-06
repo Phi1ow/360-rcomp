@@ -1,0 +1,83 @@
+      d5:      	xorl	%edi, %edi
+      d7:      	testq	%rbx, %rbx
+      da:      	je	0xde 
+      dc:      	movl	(%rbx), %edi
+      de:      	leaq	0x8(%rbx), %rsi
+      e2:      	testq	%rbx, %rbx
+      e5:      	cmoveq	%rbx, %rsi
+      e9:      	addr32		callq	0x160 
+      ef:      	movl	%eax, %edi
+      f1:      	callq	*0xbf39(%rip)           # 0xc030 
+      f7:      	ud2
+      f9:      	int3
+      fa:      	int3
+      fb:      	int3
+      fc:      	int3
+      fd:      	int3
+      fe:      	int3
+      ff:      	int3
+     100:      	pushq	%rbp
+     101:      	movq	%rsp, %rbp
+     104:      	pushq	%r14
+     106:      	pushq	%rbx
+     107:      	cmpq	$0x0, 0xbf29(%rip)      # 0xc038 
+     10f:      	sete	%al
+     112:      	cmpq	$0x0, 0xbf26(%rip)      # 0xc040 
+     11a:      	sete	%cl
+     11d:      	orb	%al, %cl
+     11f:      	jne	0x156 
+     121:      	leaq	0xc010(%rip), %rbx      # 0xc138 
+     128:      	cmpq	0xbf11(%rip), %rbx      # 0xc040 
+     12f:      	jbe	0x156 
+     131:      	leaq	0xc000(%rip), %r14      # 0xc138 
+     138:      	jmp	0x149 
+     13a:      	nopw	(%rax,%rax)
+     140:      	addq	$-0x8, %rbx
+     144:      	cmpq	%r14, %rbx
+     147:      	jbe	0x156 
+     149:      	movq	-0x8(%rbx), %rax
+     14d:      	testq	%rax, %rax
+     150:      	je	0x140 
+     152:      	callq	*%rax
+     154:      	jmp	0x140 
+     156:      	popq	%rbx
+     157:      	popq	%r14
+     159:      	popq	%rbp
+     15a:      	retq
+     15b:      	int3
+     15c:      	int3
+     15d:      	int3
+     15e:      	int3
+     15f:      	int3
+     160:      	pushq	%rbp
+     161:      	movq	%rsp, %rbp
+     164:      	pushq	%r15
+     166:      	pushq	%r14
+     168:      	pushq	%r13
+     16a:      	pushq	%r12
+     16c:      	pushq	%rbx
+     16d:      	subq	$0x18, %rsp
+     171:      	leaq	0x95bf(%rip), %r14      # 0x9737 
+     178:      	movq	%rsi, %r12
+     17b:      	movl	%edi, %r15d
+     17e:      	leaq	0x858b(%rip), %rsi      # 0x8710 
+     185:      	movq	%r14, %rdi
+     188:      	callq	*0xbeca(%rip)           # 0xc058 
+     18e:      	movq	%rax, %rbx
+     191:      	testq	%rax, %rax
+     194:      	jne	0x1b9 
+     196:      	leaq	0x8fc3(%rip), %r14      # 0x9160 
+     19d:      	leaq	0x856c(%rip), %rsi      # 0x8710 
+     1a4:      	movq	%r14, %rdi
+     1a7:      	callq	*0xbeab(%rip)           # 0xc058 
+     1ad:      	movq	%rax, %rbx
+     1b0:      	testq	%rax, %rax
+     1b3:      	je	0x3f5 
+     1b9:      	movq	%r14, 0xff80(%rip)      # 0x10140 
+     1c0:      	movq	0xbe99(%rip), %r13      # 0xc060 
+     1c7:      	movq	%rbx, %r14
+     1ca:      	testq	%rbx, %rbx
+     1cd:      	jne	0x1d3 
+     1cf:      	movq	(%r13), %r14
+     1d3:      	callq	*0xbe8f(%rip)           # 0xc068 
+     1d9:      	leaq	0x9270(%rip), %r10      # 0x9450 

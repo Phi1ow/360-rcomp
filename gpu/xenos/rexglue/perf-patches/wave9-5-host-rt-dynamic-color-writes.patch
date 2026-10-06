@@ -1,0 +1,233 @@
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -426,6 +426,14 @@
+         draw_resolution_scale_x_(draw_resolution_scale_x ? draw_resolution_scale_x : 1),
+         draw_resolution_scale_y_(draw_resolution_scale_y ? draw_resolution_scale_y : 1) {}
+ 
++  // R-comp (rcomp_host_rt_dynamic_color_writes): with host render targets, track which color outputs the
++  // pixel shader writes on its execution path, as the fragment shader interlock path does: the alpha test and
++  // alpha to coverage only apply when render target 0 is written, and a render target that shares its EDRAM
++  // base with a lower-index one (eliminated by the render target cache, the lower one is bound) replaces the
++  // lower one's output when it is written (needs edram_rt_base_dwords_scaled in the system constants).
++  // Set before translating any shader.
++  void SetHostRenderTargetDynamicColorWrites(bool enabled) { host_rt_dynamic_color_writes_ = enabled; }
++
+   uint64_t GetDefaultVertexShaderModification(
+       uint32_t dynamic_addressable_register_count,
+       Shader::HostVertexShaderType host_vertex_shader_type =
+@@ -771,6 +779,7 @@
+   // flow of the main function, and that there are no returns before either
+   // (there's a single return from the shader).
+   bool edram_fragment_shader_interlock_;
++  bool host_rt_dynamic_color_writes_ = false;
+   uint32_t draw_resolution_scale_x_;
+   uint32_t draw_resolution_scale_y_;
+ 
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -3015,6 +3015,11 @@
+           builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_uint_,
+                                    "xe_var_fsi_color_written", const_uint_0_);
+     }
++  } else if (host_rt_dynamic_color_writes_ && current_shader().writes_color_targets()) {
++    // R-comp: the color outputs written on the execution path, with host render targets too.
++    var_main_fsi_color_written_ =
++        builder_->createVariable(spv::NoPrecision, spv::StorageClassFunction, type_uint_,
++                                 "xe_var_color_written", const_uint_0_);
+   }
+ 
+   if (edram_fragment_shader_interlock_ && FSI_IsDepthStencilEarly()) {
+@@ -3628,8 +3633,8 @@
+       assert_not_zero(used_write_mask);
+       assert_true(current_shader().writes_color_target(result.storage_index));
+       target_pointer = output_or_var_fragment_data_[result.storage_index];
+-      if (edram_fragment_shader_interlock_) {
+-        assert_true(var_main_fsi_color_written_ != spv::NoResult);
++      // R-comp: also with host render targets under rcomp_host_rt_dynamic_color_writes.
++      if (var_main_fsi_color_written_ != spv::NoResult) {
+         builder_->createStore(
+             builder_->createBinOp(
+                 spv::OpBitwiseOr, type_uint_,
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -438,6 +438,18 @@
+   uint32_t color_targets_written = current_shader().writes_color_targets();
+ 
+   if ((color_targets_written & 0b1) && !IsExecutionModeEarlyFragmentTests()) {
++    // R-comp (rcomp_host_rt_dynamic_color_writes): with host render targets, whether render target 0 was
++    // written on the execution path; the alpha test and alpha to coverage only apply then, as with
++    // fragment shader interlock below.
++    spv::Id host_rt_0_written = spv::NoResult;
++    if (!edram_fragment_shader_interlock_ && var_main_fsi_color_written_ != spv::NoResult) {
++      host_rt_0_written = builder_->createBinOp(
++          spv::OpINotEqual, type_bool_,
++          builder_->createBinOp(spv::OpBitwiseAnd, type_uint_,
++                                builder_->createLoad(var_main_fsi_color_written_, spv::NoPrecision),
++                                builder_->makeUintConstant(0b1)),
++          const_uint_0_);
++    }
+     spv::Id fsi_sample_mask_in_rt_0_alpha_tests = spv::NoResult;
+     spv::Block* block_fsi_rt_0_alpha_tests_rt_written_head = nullptr;
+     spv::Block* block_fsi_rt_0_alpha_tests_rt_written_merge = nullptr;
+@@ -556,6 +568,12 @@
+       if_alpha_test_function_is_not_equal.makeEndIf();
+       spv::Id alpha_test_result = if_alpha_test_function_is_not_equal.createMergePhi(
+           alpha_test_result_not_equal, alpha_test_result_non_not_equal);
++      if (host_rt_0_written != spv::NoResult) {
++        // R-comp: no alpha test when render target 0 was not written.
++        alpha_test_result =
++            builder_->createBinOp(spv::OpLogicalOr, type_bool_, alpha_test_result,
++                                  builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, host_rt_0_written));
++      }
+       // Discard the pixel if the alpha test has failed.
+       if (edram_fragment_shader_interlock_ && !features_.demote_to_helper_invocation) {
+         fsi_pixel_potentially_killed = true;
+@@ -595,9 +613,15 @@
+           builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+                                       id_vector_temp_),
+           spv::NoPrecision);
++      spv::Id alpha_to_coverage_enabled =
++          builder_->createBinOp(spv::OpINotEqual, type_bool_, alpha_to_mask, const_uint_0_);
++      if (host_rt_0_written != spv::NoResult) {
++        // R-comp: no alpha to coverage when render target 0 was not written (full coverage was stored above).
++        alpha_to_coverage_enabled = builder_->createBinOp(spv::OpLogicalAnd, type_bool_,
++                                                          alpha_to_coverage_enabled, host_rt_0_written);
++      }
+       SpirvBuilder::IfBuilder if_alpha_to_coverage_enabled(
+-          builder_->createBinOp(spv::OpINotEqual, type_bool_, alpha_to_mask, const_uint_0_),
+-          spv::SelectionControlDontFlattenMask, *builder_);
++          alpha_to_coverage_enabled, spv::SelectionControlDontFlattenMask, *builder_);
+       {
+         if (edram_fragment_shader_interlock_) {
+           fsi_pixel_potentially_killed = true;
+@@ -894,6 +918,58 @@
+     }
+   }
+ 
++  if (!edram_fragment_shader_interlock_ && var_main_fsi_color_written_ != spv::NoResult &&
++      (color_targets_written & (color_targets_written - 1))) {
++    // R-comp (rcomp_host_rt_dynamic_color_writes): render targets bound at the same EDRAM base. The render
++    // target cache binds only the lowest-index one; on the Xenos, the outputs written on the execution path
++    // all go to that EDRAM, the highest index last (4D5307E6 picks one of two such outputs with a constant
++    // condition in its lighting pass). The command processor passes the EDRAM bases of the used render
++    // targets in edram_rt_base_dwords_scaled (unique values for unused ones).
++    spv::Id color_written = builder_->createLoad(var_main_fsi_color_written_, spv::NoPrecision);
++    spv::Id rt_bases[4] = {};
++    for (uint32_t i = 0; i < 4; ++i) {
++      if (!(color_targets_written & (uint32_t(1) << i))) {
++        continue;
++      }
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantEdramRTBaseDwordsScaled));
++      id_vector_temp_.push_back(builder_->makeIntConstant(int32_t(i)));
++      rt_bases[i] = builder_->createLoad(
++          builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
++                                      id_vector_temp_),
++          spv::NoPrecision);
++    }
++    for (uint32_t kept = 0; kept < 4; ++kept) {
++      if (!(color_targets_written & (uint32_t(1) << kept))) {
++        continue;
++      }
++      for (uint32_t aliased = kept + 1; aliased < 4; ++aliased) {
++        if (!(color_targets_written & (uint32_t(1) << aliased))) {
++          continue;
++        }
++        spv::Id replace = builder_->createBinOp(
++            spv::OpLogicalAnd, type_bool_,
++            builder_->createBinOp(spv::OpIEqual, type_bool_, rt_bases[kept], rt_bases[aliased]),
++            builder_->createBinOp(
++                spv::OpINotEqual, type_bool_,
++                builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, color_written,
++                                      builder_->makeUintConstant(uint32_t(1) << aliased)),
++                const_uint_0_));
++        spv::Id kept_color = builder_->createLoad(output_or_var_fragment_data_[kept], spv::NoPrecision);
++        spv::Id aliased_color =
++            builder_->createLoad(output_or_var_fragment_data_[aliased], spv::NoPrecision);
++        // A vector condition (a scalar one needs SPIR-V 1.4).
++        id_vector_temp_.clear();
++        id_vector_temp_.resize(4, replace);
++        builder_->createStore(
++            builder_->createTriOp(spv::OpSelect, type_float4_,
++                                  builder_->createCompositeConstruct(type_bool4_, id_vector_temp_),
++                                  aliased_color, kept_color),
++            output_or_var_fragment_data_[kept]);
++      }
++    }
++  }
++
+   if (color_targets_written) {
+     spv::Id fsi_color_targets_written = spv::NoResult;
+     spv::Id fsi_const_int_1 = spv::NoResult;
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -62,6 +62,9 @@
+                     "Render tessellation as wireframe")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// R-comp: defined in command_processor.cpp.
++REXCVAR_DECLARE(bool, rcomp_host_rt_dynamic_color_writes);
++
+ using RcompProfScope = ::rcomp::xenos::ProfScope;
+ namespace rex::graphics::vulkan {
+ 
+@@ -301,6 +304,9 @@
+       render_target_cache_.msaa_2x_no_attachments_supported(), edram_fragment_shader_interlock,
+       render_target_cache_.draw_resolution_scale_x(),
+       render_target_cache_.draw_resolution_scale_y());
++  // R-comp: rcomp_host_rt_dynamic_color_writes (host render targets only; the command processor passes the bases).
++  shader_translator_->SetHostRenderTargetDynamicColorWrites(
++      !edram_fragment_shader_interlock && REXCVAR_GET(rcomp_host_rt_dynamic_color_writes));
+ 
+   if (edram_fragment_shader_interlock) {
+     std::vector<uint8_t> depth_only_fragment_shader_code =
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -89,7 +89,19 @@
+                      "DIAGNOSTIC: number of frames logged from rcomp_readback_trace_first_frame")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// R-comp: with host render targets, track the color outputs a pixel shader writes on its execution path (as the fragment
++// shader interlock path does): the alpha test and alpha to coverage apply only when render target 0 is written, and a render
++// target bound at the same EDRAM base as a lower-index one (which the render target cache keeps, eliminating the other) replaces
++// the lower one's output when it is written - the Xenos sends both to the same EDRAM. 4D5307E6 picks one of two such outputs with
++// a constant condition in its lighting pass. See SpirvShaderTranslator::SetHostRenderTargetDynamicColorWrites.
++REXCVAR_DEFINE_BOOL(rcomp_host_rt_dynamic_color_writes, false, "GPU/Vulkan",
++                    "Host render targets: per-pixel tracking of the color outputs written (alpha test only with render target 0 "
++                    "written, outputs of render targets sharing an EDRAM base merged)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace {
++// rcomp_host_rt_dynamic_color_writes on the host render target path, set once at initialization.
++bool rcomp_host_rt_dynamic_color_writes_enabled = false;
+ // Draws issued (IssueDraw calls), for the draws_since field of the traced read-backs; the command processor thread only.
+ uint64_t rcomp_trace_draw_counter = 0;
+ // Set when the R-comp downscale pipeline replaced the SDK's (one command processor per title).
+@@ -1168,6 +1180,11 @@
+     REXGPU_ERROR("Failed to initialize the render target cache");
+     return false;
+   }
++  // R-comp: rcomp_host_rt_dynamic_color_writes (the pipeline cache's shader translator reads the same flag).
++  rcomp_host_rt_dynamic_color_writes_enabled =
++      REXCVAR_GET(rcomp_host_rt_dynamic_color_writes) &&
++      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets;
++  std::fprintf(stderr, "RCOMP-HOST-RT-DYNAMIC-WRITES %u\n", unsigned(rcomp_host_rt_dynamic_color_writes_enabled));
+ 
+   // Shared memory and EDRAM descriptor set layout.
+   bool edram_fragment_shader_interlock =
+@@ -7958,6 +7975,15 @@
+             std::memcmp(system_constants_.edram_rt_clamp[i], rt_clamp[i], 4 * sizeof(float)) != 0;
+         std::memcpy(system_constants_.edram_rt_clamp[i], rt_clamp[i], 4 * sizeof(float));
+       }
++    } else if (rcomp_host_rt_dynamic_color_writes_enabled) {
++      // R-comp (rcomp_host_rt_dynamic_color_writes): the EDRAM base of each used render target, so that the
++      // pixel shader can send an output of a render target sharing the base of a lower-index one (eliminated
++      // by the render target cache) to the bound one; unused render targets get values no base can equal.
++      const uint32_t rt_base_or_unique = ((normalized_color_mask >> (4 * i)) & 0b1111)
++                                             ? uint32_t(color_info.color_base)
++                                             : (UINT32_C(0xFFFFFFF0) | i);
++      dirty |= system_constants_.edram_rt_base_dwords_scaled[i] != rt_base_or_unique;
++      system_constants_.edram_rt_base_dwords_scaled[i] = rt_base_or_unique;
+     }
+   }
+ 

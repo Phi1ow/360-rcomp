@@ -1,0 +1,748 @@
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -80,6 +80,13 @@
+                     "DIAGNOSTIC: verify the fused resolve against the two-pass path word by word on the GPU (needs rcomp_fused_resolve)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// R-comp: also fuse the "full" copies (conversion of the color with the averaging of the samples of an MSAA surface): a bit mask of the source kinds, 1 = 8:8:8:8, 2 = 32-bit float,
++// 4 = float 2:10:10:10 to a 32-bit destination, 8 = float 2:10:10:10 to a 64-bit destination. Host test (tools/host_gpu_bench/fused_resolve, fused_full.comp): bit-identical, except the payload
++// of a NaN sum (32-bit float); faster than the two passes on the host for 1 and 2, parity or slower for 4 and 8. Needs rcomp_fused_resolve.
++REXCVAR_DEFINE_INT32(rcomp_fused_resolve_full_mask, 0, "GPU/Vulkan",
++                     "Bit mask of the source kinds whose full-copy resolves are fused (1 = 8:8:8:8, 2 = 32-bit float, 4 = float 2:10:10:10 to 32 bits, 8 = the same to 64 bits)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace {
+ // The fused dump + resolve copy shader (fast 32-bit copy): see gpu/xenos/rexglue/perf-patches and tools/host_gpu_bench/fused_resolve/fused_resolve_bench.cpp. The source is the one the host test
+ // compiled; the #version and #extension lines and the variant #define lines are written in front of it by GetFusedResolvePipeline.
+@@ -371,6 +378,625 @@
+   dest[first_index] = first;
+   dest[second_index] = second;
+ }
++)GLSL";
++// The fused dump + "full" resolve copy shader (tools/host_gpu_bench/fused_resolve/fused_full.comp, host-tested against the SDK's resolve_full_32bpp_scaled_cs and resolve_full_64bpp_scaled_cs).
++const char kRcompFusedResolveFullGlsl[] = R"GLSL(// Fused render target dump + resolve copy for the "full" copies of the Xenos GPU subsystem (resolve_full_32bpp_scaled_cs and resolve_full_64bpp_scaled_cs: conversion of the color to
++// the destination texture format, with exponent bias, red/blue swap and averaging of the samples of the MSAA surface). The copy shader of the SDK reads the EDRAM buffer that a dump
++// pass has just filled from the host render target image; this shader reads the image itself and writes the destination in the one pass. The SDK has no source of these shaders
++// here: the body is a transcription of the SPIR-V disassembly of the two precompiled shaders (the "_scaled" variants: the loads of the samples of a pixel, the averaging order,
++// the exponent bias, the red/blue swap, the conversion switch on the destination format, the duplication of the first pixels, the endian swap, the addressing), checked against the
++// precompiled shaders by the host test (tools/host_gpu_bench/fused_resolve/fused_resolve_bench.cpp: random legal parameters, bit-identical destination buffers). What replaces the
++// EDRAM read is the dump shader's arithmetic run backwards (the same as fused_fast32.comp): the EDRAM sample address -> the tile of the render target -> its pixel and sample -> the
++// color the dump would have stored there (packed to 32 bits) and the copy would have unpacked.
++// Thread mapping (THREAD_PIXELS): 4 = as the original, 8 x 8 threads of 4 destination pixels (one 16-byte group; two groups for a 64-bit destination), the stores of vec4s; 1 = one
++// thread per pixel in a 32 x 8 workgroup (the same 32 x 8 pixels), consecutive threads reading consecutive pixels of the image (as the dump does) and writing consecutive words.
++// Either way the dispatch is the copy's own, the group counts of the SDK's copy shader. 4 amortizes the addressing and is faster on every host GPU measured, except for a half
++// float color at 4x MSAA (16 strided fetches per thread of a multisampled image: 3 times slower on the RX 9070 XT), where 1 is as fast as the two passes.
++// Default: 1 for the float 2:10:10:10 kind at 4x, else 4.
++// Compile-time variant parameters (the caller prepends the #define lines):
++//   SCALE_X, SCALE_Y   draw resolution scale (the copy shader is the "_scaled" one: the destination is the scaled resolve buffer)
++//   SRC_MSAA           guest MSAA of the render target: 0 = 1x, 1 = 2x, 2 = 4x (must be the MSAA of the copy's EDRAM info)
++//   SRC_KIND           color source kind (the host render target format and how the dump packs it): 1 = 8:8:8:8, 2 = 2:10:10:10, 3 = 2:10:10:10 float (7e3 from a half float image;
++//                      the copy's EDRAM formats 3 and 12 are the same), 4 = 32-bit float bits
++//   SRC_UINT           1 = the color image is sampled as unsigned integers (32-bit float kept as bits), 0 = as floats
++//   DEST_BPP           32 = the shader of resolve_full_32bpp (destinations of 32 bits per pixel), 64 = resolve_full_64bpp (64 bits per pixel)
++//   HOST_2X_SAMPLE_0, HOST_2X_SAMPLE_1   host sample index of guest samples 0 and 1 of a 2x surface
++//   THREAD_PIXELS      4 or 1: see above
++//   ROUNDTRIP_DIRECT   1 (default) = the dump's packing and the copy's unpacking of a sample collapsed (FetchColor), 0 = the two literally one after the other (debug)
++// Everything the SDK copy does for a destination format of its class (the whole switch of the original) is reproduced at run time from the push constants; the source formats are
++// the 32-bit-per-sample ones named above (the 64-bit EDRAM formats, depth and gamma are not variants). Host-tested kinds: 1, 3 and 4 (kind 2 has no logged dump shader to test
++// against: NOT TESTED).
++// Preconditions of a fusable resolve (checked by the caller, see the delivery note): the samples the copy reads lie in the tiles of the span that the render target owns (single
++// sample selects at 1x only 0; 2x only 0, 1 and the average 01; 4x any), no wrap of the EDRAM addressing, the MSAA and format of the copy's EDRAM info are the variant's, the draw
++// resolution scale is SCALE_X x SCALE_Y.
++// Not bit-identical: the payload of a NaN that is the sum of two NaN samples (kind 4, sample select 4 and above): which operand's payload the hardware keeps depends on the operand
++// order that the driver's compiler chose for each shader (host test: the original keeps the third sample's, this shader the first's, on the Windows AMD driver). Every value that is
++// not such a NaN is bit-identical.
++#ifndef THREAD_PIXELS
++#if SRC_MSAA >= 2 && SRC_KIND == 3
++#define THREAD_PIXELS 1
++#else
++#define THREAD_PIXELS 4
++#endif
++#endif
++
++#if THREAD_PIXELS == 4
++layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
++#else
++layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
++#endif
++
++layout(push_constant) uniform PushConstants {
++  uint edram_info;
++  uint coordinate_info;
++  uint dest_info;
++  uint dest_coordinate_info;
++  uint dest_base;            // unused: the scaled resolve destination is addressed relative to the bound range
++  uint source_base_tiles;    // the render target's base tile
++  uint source_pitch_tiles;   // the render target's pitch in tiles
++  uint dispatch_first_tile;  // unused
++} pc;
++
++#if THREAD_PIXELS == 4
++layout(std430, set = 0, binding = 0) writeonly buffer DestBuffer { uvec4 dest[]; };
++#elif DEST_BPP == 32
++layout(std430, set = 0, binding = 0) writeonly buffer DestBuffer { uint dest[]; };
++#else
++layout(std430, set = 0, binding = 0) writeonly buffer DestBuffer { uvec2 dest[]; };
++#endif
++
++#if SRC_MSAA == 0
++#define SRC_TEXTURE_2D texture2D
++#define USRC_TEXTURE_2D utexture2D
++#define FETCH(tex, p, s) texelFetch(tex, p, 0)
++#else
++#define SRC_TEXTURE_2D texture2DMS
++#define USRC_TEXTURE_2D utexture2DMS
++#define FETCH(tex, p, s) texelFetch(tex, p, s)
++#endif
++
++#if SRC_UINT
++layout(set = 1, binding = 0) uniform USRC_TEXTURE_2D source_color;
++#else
++layout(set = 1, binding = 0) uniform SRC_TEXTURE_2D source_color;
++#endif
++
++#if DEST_BPP == 32
++#define BPB_LOG2 2
++#define GROUP_LOG2 2  // destination pixels per 16 bytes, log2
++#else
++#define BPB_LOG2 3
++#define GROUP_LOG2 1
++#endif
++
++// ---- the conversions of the dump shader (VulkanRenderTargetCache::GetDumpPipeline and SpirvShaderTranslator)
++
++uint PreClampedFloat32To7e3(float f32) {
++  uint bits = floatBitsToUint(f32);
++  uint denormal_biased = bitfieldInsert(bits, 1u, 23, 9);
++  denormal_biased >>= min(125u - (bits >> 23), 24u);
++  uint normal_biased = bits - (124u << 23);
++  uint biased = (bits < 0x3E800000u) ? denormal_biased : normal_biased;
++  return bitfieldExtract(biased + 0x7FFFu + bitfieldExtract(biased, 16, 1), 16, 10);
++}
++
++uint UnclampedFloat32To7e3(float f32) {
++  // NClamp(f32, 0, 31.875): a NaN becomes 0.
++  float clamped = isnan(f32) ? 0.0 : min(max(f32, 0.0), 31.875);
++  return PreClampedFloat32To7e3(clamped);
++}
++
++// The packed 32-bit EDRAM word of one sample of the render target: what the dump stores, and the copy then loads and unpacks to a color. ROUNDTRIP_DIRECT = 0 builds this
++// literally (the packing and the unpacking of the two shaders one after the other); ROUNDTRIP_DIRECT = 1 (the default) gives the same color in fewer operations (see FetchColor).
++uint PackedSample(ivec2 pixel, int sample_index) {
++#if SRC_KIND == 1
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uvec4 u = uvec4(c * 255.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(u.x, u.y, 8, 8), u.z, 16, 8), u.w, 24, 8);
++#elif SRC_KIND == 2
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uint r = uint(c.x * 1023.0 + 0.5), g = uint(c.y * 1023.0 + 0.5), b = uint(c.z * 1023.0 + 0.5), a = uint(c.w * 3.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(r, g, 10, 10), b, 20, 10), a, 30, 2);
++#elif SRC_KIND == 3
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uint r = UnclampedFloat32To7e3(c.x), g = UnclampedFloat32To7e3(c.y), b = UnclampedFloat32To7e3(c.z);
++  float alpha = isnan(c.w) ? 0.0 : min(max(c.w, 0.0), 1.0);
++  uint a = uint(alpha * 3.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(r, g, 10, 10), b, 20, 10), a, 30, 2);
++#else  // SRC_KIND == 4
++#if SRC_UINT
++  return FETCH(source_color, pixel, sample_index).x;
++#else
++  return floatBitsToUint(FETCH(source_color, pixel, sample_index).x);
++#endif
++#endif
++}
++
++// ---- the copy shader: the unpacking of a packed EDRAM word to a color (XeResolveUnpack32bpp4Samples for the source kind)
++
++vec4 UnpackColor(uint w) {
++#if SRC_KIND == 1
++  return vec4((uvec4(w) >> uvec4(0u, 8u, 16u, 24u)) & uvec4(255u)) * 0.00392156886;
++#elif SRC_KIND == 2
++  return vec4((uvec4(w) >> uvec4(0u, 10u, 20u, 30u)) & uvec4(1023u, 1023u, 1023u, 3u)) *
++         vec4(0.000977517106, 0.000977517106, 0.000977517106, 0.333333343);
++#elif SRC_KIND == 3
++  uvec3 c = (uvec3(w) >> uvec3(0u, 10u, 20u)) & uvec3(1023u);
++  uvec3 mantissa = c & uvec3(127u);
++  uvec3 exponent = c >> uvec3(7u);
++  bvec3 is_denormal = equal(exponent, uvec3(0u));
++  uvec3 msb = uvec3(findMSB(mantissa));  // 0xFFFFFFFF for a zero mantissa
++  uvec3 shift = uvec3(7u) - msb;
++  uvec3 exponent_denormal = msb + uvec3(4294967290u);
++  uvec3 exponent_final = mix(exponent, exponent_denormal, is_denormal);
++  uvec3 mantissa_normalized = (mantissa << shift) & uvec3(127u);
++  uvec3 mantissa_final = mix(mantissa, mantissa_normalized, is_denormal);
++  uvec3 bits = ((exponent_final + uvec3(124u)) << uvec3(23u)) | (mantissa_final << uvec3(16u));
++  bits = mix(bits, uvec3(0u), equal(c, uvec3(0u)));
++  return vec4(uintBitsToFloat(bits), float(w >> 30u) * 0.333333343);
++#else
++  return vec4(uintBitsToFloat(w), 0.0, 0.0, 0.0);
++#endif
++}
++
++#ifndef ROUNDTRIP_DIRECT
++#define ROUNDTRIP_DIRECT 1
++#endif
++
++#if SRC_KIND == 3
++// The 10-bit 7e3 code of a color component as the dump packs it, decoded as the copy decodes it, without the packing into the word in between: a code below 128 is a denormal
++// (exponent 0, value mantissa * 2^-9, exactly what the copy's normalization of the mantissa gives), any other code has the float exponent field of the code + 124 and the
++// mantissa of the code in the top 7 bits of the float's: bits = (code << 16) + (124 << 23). Checked by the host test against the literal build (ROUNDTRIP_DIRECT = 0) and the original.
++float Roundtrip7e3(float f32) {
++  uint code = UnclampedFloat32To7e3(f32);
++  return code < 128u ? float(code) * 0.001953125 : uintBitsToFloat((code << 16) + 0x3E000000u);
++}
++#endif
++
++// One sample of the render target as the copy shader sees it after the EDRAM: the dump's packing followed by the copy's unpacking.
++vec4 FetchColor(ivec2 pixel, int sample_index) {
++#if ROUNDTRIP_DIRECT == 0
++  return UnpackColor(PackedSample(pixel, sample_index));
++#elif SRC_KIND == 1
++  // 8 bits per component: the dump's byte of c * 255 + 0.5, the copy's byte * (1/255) (the bytes of the word are the components, no mixing).
++  uvec4 u = uvec4(FETCH(source_color, pixel, sample_index) * 255.0 + 0.5);
++  return vec4(u) * 0.00392156886;
++#elif SRC_KIND == 2
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uvec4 u = uvec4(uint(c.x * 1023.0 + 0.5), uint(c.y * 1023.0 + 0.5), uint(c.z * 1023.0 + 0.5), uint(c.w * 3.0 + 0.5));
++  return vec4(u) * vec4(0.000977517106, 0.000977517106, 0.000977517106, 0.333333343);
++#elif SRC_KIND == 3
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  float alpha = isnan(c.w) ? 0.0 : min(max(c.w, 0.0), 1.0);
++  return vec4(Roundtrip7e3(c.x), Roundtrip7e3(c.y), Roundtrip7e3(c.z), float(uint(alpha * 3.0 + 0.5)) * 0.333333343);
++#else  // SRC_KIND == 4
++#if SRC_UINT
++  return vec4(uintBitsToFloat(FETCH(source_color, pixel, sample_index).x), 0.0, 0.0, 0.0);
++#else
++  return vec4(FETCH(source_color, pixel, sample_index).x, 0.0, 0.0, 0.0);
++#endif
++#endif
++}
++
++// A sample of the render target in the sample space of its tiles (80x16 samples at 1x scale per tile), as the dump shader splits it into the pixel and the host sample.
++vec4 ColorAt(uint sample_x, uint sample_y) {
++#if SRC_MSAA == 0
++  return FetchColor(ivec2(int(sample_x), int(sample_y)), 0);
++#elif SRC_MSAA == 1
++  return FetchColor(ivec2(int(sample_x), int(sample_y >> 1)), (sample_y & 1u) != 0u ? HOST_2X_SAMPLE_1 : HOST_2X_SAMPLE_0);
++#else
++  return FetchColor(ivec2(int(sample_x >> 1), int(sample_y >> 1)), int((sample_x & 1u) | ((sample_y & 1u) << 1)));
++#endif
++}
++
++// ---- the conversion to the destination format (the switch of the copy shader)
++
++#if DEST_BPP == 32
++uint Pack8888(vec4 c) {
++  uvec4 u = uvec4(clamp(c, vec4(0.0), vec4(1.0)) * 255.0 + vec4(0.5));
++  return u.x | (u.y << 8) | (u.z << 16) | (u.w << 24);
++}
++uint Pack2101010(vec4 c) {
++  uvec4 u = uvec4(clamp(c, vec4(0.0), vec4(1.0)) * vec4(1023.0, 1023.0, 1023.0, 3.0) + vec4(0.5));
++  return u.x | (u.y << 10) | (u.z << 20) | (u.w << 30);
++}
++uint Pack11_11_10(vec4 c) {
++  uvec3 u = uvec3(clamp(c.xyz, vec3(0.0), vec3(1.0)) * vec3(2047.0, 2047.0, 1023.0) + vec3(0.5));
++  return u.x | (u.y << 11) | (u.z << 22);
++}
++uint Pack10_11_11(vec4 c) {
++  uvec3 u = uvec3(clamp(c.xyz, vec3(0.0), vec3(1.0)) * vec3(1023.0, 2047.0, 2047.0) + vec3(0.5));
++  return u.x | (u.y << 10) | (u.z << 21);
++}
++uint Pack16_16(vec4 c) {
++  uvec2 u = uvec2(clamp(c.xy, vec2(0.0), vec2(1.0)) * 65535.0 + vec2(0.5));
++  return u.x | (u.y << 16);
++}
++
++uint ConvertPixel(uint dest_format, vec4 p) {
++  switch (dest_format) {
++    case 6u:
++    case 14u:
++    case 50u:
++      return Pack8888(p);
++    case 7u:
++    case 54u:
++      return Pack2101010(p);
++    case 16u:
++    case 55u:
++      return Pack11_11_10(p);
++    case 17u:
++    case 56u:
++      return Pack10_11_11(p);
++    case 25u:
++      return Pack16_16(p);
++    case 31u:
++      return packHalf2x16(p.xy);
++    default:  // treated as 32_FLOAT
++      return floatBitsToUint(p.x);
++  }
++}
++#else
++uvec2 Pack16x4(vec4 c) {
++  uvec4 u = uvec4(clamp(c, vec4(0.0), vec4(1.0)) * 65535.0 + vec4(0.5));
++  return u.xz | (u.yw << uvec2(16u));
++}
++
++uvec2 ConvertPixel(uint dest_format, vec4 p) {
++  switch (dest_format) {
++    case 32u:
++      return uvec2(packHalf2x16(p.xy), packHalf2x16(p.zw));
++    case 26u:
++      return Pack16x4(p);
++    default:  // treated as 32_32_FLOAT
++      return uvec2(floatBitsToUint(p.x), floatBitsToUint(p.y));
++  }
++}
++#endif
++
++// ---- the destination addressing (the same code as fused_fast32.comp, with the pixel size of the destination)
++
++uint TiledOffset2D(int x, int y, int pitch32) {
++  int macro_tile = (x >> 5) + (y >> 5) * pitch32;
++  int t = macro_tile << (7 + BPB_LOG2);
++  int a = (x & 7) + ((y & 14) << 2);
++  int b = a << BPB_LOG2;
++  int c = (b & -16) << 1;
++  int d = t + c + (b & 15);
++  int e = d + ((y & 1) << 4);
++  int f = ((e & -512) << 3) + ((y & 16) << 7) + ((e & 448) << 2);
++  int g = f + ((((y & 8) >> 2) + (x >> 3)) & 3) * 64;
++  return uint(g + (e & 63));
++}
++
++uint TiledOffset3D(ivec3 p, int pitch32, int height16) {
++  int y16 = p.y >> 4;
++  int z4 = p.z >> 2;
++  int index = ((y16 + z4 * height16) * pitch32);
++  int x32 = (p.x >> 5) + index;
++  int a = (x32 << (6 + BPB_LOG2)) & 0x0FFFFFFF;
++  int a2 = a << 1;
++  int b = (p.x & 7) + ((p.y & 6) << 2);
++  int b2 = (b << (6 + BPB_LOG2)) >> 6;
++  int bank = ((p.y >> 3) + z4) & 1;
++  int c = (p.x >> 3) + (bank << 1);
++  int d = c & 3;
++  int e = bank + (d << 1);
++  int f = (b2 & -16) + a2;
++  int g = (f << 1) + (b2 & 15);
++  int h = g + ((p.z & 3) << (6 + BPB_LOG2)) + ((p.y & 1) << 4);
++  int pipe = ((e & 1) << 3) + ((h >> 6) & 7);
++  int i = (((pipe << 3) + (e & -2)) << 2) + (h & -512);
++  return uint((i << 3) + (h & 63));
++}
++
++uint Swap8In16(uint v) { return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8); }
++uint Swap16In32(uint v) { return (v << 16) | (v >> 16); }
++
++#if DEST_BPP == 32
++uint SwapEndian(uint v, uint endian) {
++  if (endian == 1u || endian == 2u) {
++    v = Swap8In16(v);
++  }
++  if (endian == 2u || endian == 3u) {
++    v = Swap16In32(v);
++  }
++  return v;
++}
++#else
++uvec2 SwapEndian(uvec2 v, uint endian) {
++  if (endian == 4u) {  // 8in64: the two words of the pixel swap places, then the 8in32
++    v = v.yx;
++    endian = 2u;
++  }
++  if (endian == 1u || endian == 2u) {
++    v = uvec2(Swap8In16(v.x), Swap8In16(v.y));
++  }
++  if (endian == 2u || endian == 3u) {
++    v = uvec2(Swap16In32(v.x), Swap16In32(v.y));
++  }
++  return v;
++}
++#endif
++
++#if THREAD_PIXELS == 4
++// Four consecutive destination pixels' samples (the copy's four loads at the EDRAM word stride of a pixel), as colors.
++void Load4(uint sample_x, uint sample_y, out vec4 p0, out vec4 p1, out vec4 p2, out vec4 p3) {
++#if SRC_MSAA >= 2
++  const uint pixel_step = 2u;  // 4x: a pixel is two samples wide
++#else
++  const uint pixel_step = 1u;
++#endif
++  p0 = ColorAt(sample_x, sample_y);
++  p1 = ColorAt(sample_x + pixel_step, sample_y);
++  p2 = ColorAt(sample_x + 2u * pixel_step, sample_y);
++  p3 = ColorAt(sample_x + 3u * pixel_step, sample_y);
++}
++
++void main() {
++  uint c0 = pc.edram_info, c1 = pc.coordinate_info, c2 = pc.dest_info, c3 = pc.dest_coordinate_info;
++
++  uint edram_pitch_tiles = c0 & 1023u;
++  uint edram_base_tiles = (c0 >> 13) & 2047u;
++  bool duplicate_second_pixel = (c0 & 0x20000000u) != 0u;
++
++  // The draw resolution scale of the copy's push constants is the compile-time one (the pipeline is made per scale): the divisions below are by constants.
++  const uvec2 scale = uvec2(uint(SCALE_X), uint(SCALE_Y));
++  uvec2 duplicate = duplicate_second_pixel ? (scale >> 1u) : uvec2(0u);
++  uvec2 region_offset = ((uvec2(c1) >> uvec2(0u, 4u)) & uvec2(15u, 1u)) << 3u;
++  uvec2 region_offset_scaled = region_offset * scale;
++  uint width_threads = ((c1 >> 5u) & 2047u) * scale.x;
++
++  uint endian = c2 & 7u;
++  bool is_3d = (c2 & 8u) != 0u;
++  uint slice = (c2 >> 4u) & 7u;
++  uint dest_format = (c2 >> 7u) & 63u;
++  float bias_factor = uintBitsToFloat(uint((int(c2) << 10 >> 26 << 23) + 1065353216));
++  bool swap_red_blue = (c2 & 0x1000000u) != 0u;
++
++  uint pitch_texels = (c3 & 1023u) << 5u;
++  uint height_texels = ((c3 >> 10u) & 1023u) << 5u;
++  uvec2 dest_offset_scaled = (((uvec2(c3) >> uvec2(20u, 24u)) & uvec2(15u)) << 3u) * scale;
++  uint sample_select = (c3 >> 28u) & 7u;
++
++  uvec2 sample_xy = uvec2(gl_GlobalInvocationID.xy) << uvec2(2u, 0u);
++  if (sample_xy.x >= (width_threads << 3u)) {
++    return;
++  }
++  uvec2 position = uvec2(sample_xy.x, max(sample_xy.y, duplicate.y)) + region_offset_scaled;
++
++  uint sample_index;
++  if (sample_select <= 3u) {
++    sample_index = sample_select;
++  } else {
++    sample_index = (sample_select == 5u) ? 2u : 0u;
++  }
++  const uvec2 msaa_shift = uvec2(SRC_MSAA >= 2 ? 1u : 0u, SRC_MSAA >= 1 ? 1u : 0u);
++  uvec2 sample_position = (position << msaa_shift) + ((uvec2(sample_index) >> uvec2(1u, 0u)) & uvec2(1u));
++
++  const uint tile_width = 80u * uint(SCALE_X);
++  const uint tile_height = 16u * uint(SCALE_Y);
++  uvec2 tile_dims = uvec2(tile_width, tile_height);
++  uvec2 tile = sample_position / tile_dims;
++  uint tile_number = edram_base_tiles + tile.y * edram_pitch_tiles + tile.x;
++  uvec2 in_tile = sample_position - tile * tile_dims;
++
++  // The copy loads four pixels at the EDRAM word stride of a pixel from the sample of this position; with a sample select of 4 and above the next sample row is added (+ the tile
++  // row stride, 80 * scale.x words) and with 6 the next sample of the row (+1 word). In the sample space of the render target these are +1 in y and +1 in x of the first pixel.
++  uint source_tile_index = tile_number - pc.source_base_tiles;
++  // floor(index / pitch) of a tile index below 2048 by a pitch up to 1023 through a float division: (index + 0.5) / pitch never reaches the next integer by more than 2^-11.
++  uint source_tile_y = uint((float(source_tile_index) + 0.5) / float(pc.source_pitch_tiles));
++  uint source_tile_x = source_tile_index - source_tile_y * pc.source_pitch_tiles;
++  uint source_sample_x = tile_width * source_tile_x + in_tile.x;
++  uint source_sample_y = tile_height * source_tile_y + in_tile.y;
++
++  // precise: the original evaluates the unpacking, the sum of the samples in the order A + B + C + D and the multiplication by the exponent bias as written (its unpacking and
++  // averaging sit in separate branches of format and sample select switches, where no compiler can fuse or reassociate them). Fully inlined for one source kind, the same
++  // expressions would be contracted into fused multiply-adds and regrouped by the compiler of the driver: results differ in the last bit of the float (host test: millions of words
++  // with a 32-bit float destination from an 8:8:8:8 source). The conversion to the destination format is not precise: there the original is straight-line code too.
++  precise vec4 p0, p1, p2, p3;
++  Load4(source_sample_x, source_sample_y, p0, p1, p2, p3);
++  float factor = bias_factor;
++  if (sample_select >= 4u) {
++    vec4 q0, q1, q2, q3;
++    Load4(source_sample_x, source_sample_y + 1u, q0, q1, q2, q3);
++    p0 += q0;
++    p1 += q1;
++    p2 += q2;
++    p3 += q3;
++    factor = bias_factor * 0.5;
++    if (sample_select >= 6u) {
++      Load4(source_sample_x + 1u, source_sample_y, q0, q1, q2, q3);
++      p0 += q0;
++      p1 += q1;
++      p2 += q2;
++      p3 += q3;
++      Load4(source_sample_x + 1u, source_sample_y + 1u, q0, q1, q2, q3);
++      p0 += q0;
++      p1 += q1;
++      p2 += q2;
++      p3 += q3;
++      factor = bias_factor * 0.25;
++    }
++  }
++  p0 *= factor;
++  p1 *= factor;
++  p2 *= factor;
++  p3 *= factor;
++  if (swap_red_blue) {
++    p0 = p0.zyxw;
++    p1 = p1.zyxw;
++    p2 = p2.zyxw;
++    p3 = p3.zyxw;
++  }
++
++  // The original duplicates the converted second pixel of the first group of four over the pixels before it.
++#if DEST_BPP == 32
++  uvec4 first = uvec4(ConvertPixel(dest_format, p0), ConvertPixel(dest_format, p1), ConvertPixel(dest_format, p2), ConvertPixel(dest_format, p3));
++  if (sample_xy.x == 0u && duplicate.x != 0u) {
++    if (duplicate.x >= 2u) {
++      if (duplicate.x >= 3u) {
++        first.z = first.w;
++      }
++      first.y = first.z;
++    }
++    first.x = first.y;
++  }
++  first = uvec4(SwapEndian(first.x, endian), SwapEndian(first.y, endian), SwapEndian(first.z, endian), SwapEndian(first.w, endian));
++#else
++  uvec2 w0 = ConvertPixel(dest_format, p0), w1 = ConvertPixel(dest_format, p1), w2 = ConvertPixel(dest_format, p2), w3 = ConvertPixel(dest_format, p3);
++  if (sample_xy.x == 0u && duplicate.x != 0u) {
++    if (duplicate.x >= 2u) {
++      if (duplicate.x >= 3u) {
++        w2 = w3;
++      }
++      w1 = w2;
++    }
++    w0 = w1;
++  }
++  uvec4 first = uvec4(SwapEndian(w0, endian), SwapEndian(w1, endian));
++  uvec4 second = uvec4(SwapEndian(w2, endian), SwapEndian(w3, endian));
++#endif
++
++  uvec2 dest_position = sample_xy + dest_offset_scaled;
++  uint dest_group = dest_position.x >> uint(GROUP_LOG2);
++  uvec2 guest = uvec2(dest_group, dest_position.y) / scale;
++  uint guest_x = guest.x << uint(GROUP_LOG2);
++  uint guest_y = guest.y;
++  uint tiled;
++  if (!is_3d) {
++    tiled = TiledOffset2D(int(guest_x), int(guest_y), int(pitch_texels >> 5u));
++  } else {
++    tiled = TiledOffset3D(ivec3(int(guest_x), int(guest_y), int(slice)), int(pitch_texels >> 5u), int(height_texels >> 4u));
++  }
++  uvec2 remainder = uvec2(dest_group, dest_position.y) - guest * scale;
++  uint block = scale.x * scale.y;
++  uint within = ((remainder.x * scale.y + remainder.y) << uint(GROUP_LOG2)) + (dest_position.x & ((1u << uint(GROUP_LOG2)) - 1u));
++  uint byte_offset = tiled * block + (within << uint(BPB_LOG2));
++  uint first_index = byte_offset >> 4u;
++
++#if DEST_BPP == 32
++  dest[first_index] = first;
++#else
++  // The second group of two pixels is the next 16 bytes of the unscaled layout; scaled, the groups of a row are 'scale' blocks apart and the one after the last of a run of
++  // 'scale' groups jumps to the next block.
++  uint second_step;
++  if (scale.x > 1u) {
++    uint x2 = sample_xy.x >> 1u;
++    uint x2_remainder = x2 - (x2 / scale.x) * scale.x;
++    second_step = (x2_remainder + 1u == scale.x) ? (32u * scale.x - (x2_remainder << 4u)) : 16u;
++  } else {
++    second_step = 32u;
++  }
++  uint second_index = first_index + ((second_step * scale.y) >> 4u);
++  dest[first_index] = first;
++  dest[second_index] = second;
++#endif
++}
++#else  // THREAD_PIXELS == 1
++void main() {
++  uint c0 = pc.edram_info, c1 = pc.coordinate_info, c2 = pc.dest_info, c3 = pc.dest_coordinate_info;
++
++  uint edram_pitch_tiles = c0 & 1023u;
++  uint edram_base_tiles = (c0 >> 13) & 2047u;
++  bool duplicate_second_pixel = (c0 & 0x20000000u) != 0u;
++
++  // The draw resolution scale of the copy's push constants is the compile-time one (the pipeline is made per scale): the divisions below are by constants.
++  const uvec2 scale = uvec2(uint(SCALE_X), uint(SCALE_Y));
++  uvec2 duplicate = duplicate_second_pixel ? (scale >> 1u) : uvec2(0u);
++  uvec2 region_offset = ((uvec2(c1) >> uvec2(0u, 4u)) & uvec2(15u, 1u)) << 3u;
++  uvec2 region_offset_scaled = region_offset * scale;
++  uint width_pixels = (((c1 >> 5u) & 2047u) * scale.x) << 3u;
++
++  uint endian = c2 & 7u;
++  bool is_3d = (c2 & 8u) != 0u;
++  uint slice = (c2 >> 4u) & 7u;
++  uint dest_format = (c2 >> 7u) & 63u;
++  float bias_factor = uintBitsToFloat(uint((int(c2) << 10 >> 26 << 23) + 1065353216));
++  bool swap_red_blue = (c2 & 0x1000000u) != 0u;
++
++  uint pitch_texels = (c3 & 1023u) << 5u;
++  uint height_texels = ((c3 >> 10u) & 1023u) << 5u;
++  uvec2 dest_offset_scaled = (((uvec2(c3) >> uvec2(20u, 24u)) & uvec2(15u)) << 3u) * scale;
++  uint sample_select = (c3 >> 28u) & 7u;
++
++  uvec2 pixel_xy = uvec2(gl_GlobalInvocationID.xy);
++  if (pixel_xy.x >= width_pixels) {
++    return;
++  }
++  // The original duplicates the converted second pixel of the group of four at the start of the row over the pixels before it (the half pixel offset fill of a scaled
++  // resolve: duplicate.x = scale.x >> 1 = 1 for scale 2 and 3): pixel x < duplicate.x takes the value of the pixel duplicate.x. Conversion is per pixel, so it is the source
++  // pixel that moves; the pixel is stored at its own place.
++  uint source_x = (pixel_xy.x < duplicate.x) ? duplicate.x : pixel_xy.x;
++  uvec2 position = uvec2(source_x, max(pixel_xy.y, duplicate.y)) + region_offset_scaled;
++
++  uint sample_index;
++  if (sample_select <= 3u) {
++    sample_index = sample_select;
++  } else {
++    sample_index = (sample_select == 5u) ? 2u : 0u;
++  }
++  const uvec2 msaa_shift = uvec2(SRC_MSAA >= 2 ? 1u : 0u, SRC_MSAA >= 1 ? 1u : 0u);
++  uvec2 sample_position = (position << msaa_shift) + ((uvec2(sample_index) >> uvec2(1u, 0u)) & uvec2(1u));
++
++  const uint tile_width = 80u * uint(SCALE_X);
++  const uint tile_height = 16u * uint(SCALE_Y);
++  uvec2 tile_dims = uvec2(tile_width, tile_height);
++  uvec2 tile = sample_position / tile_dims;
++  uint tile_number = edram_base_tiles + tile.y * edram_pitch_tiles + tile.x;
++  uvec2 in_tile = sample_position - tile * tile_dims;
++
++  // The copy loads the sample of this position; with a sample select of 4 and above the next sample row is added (+ the tile row stride, 80 * scale.x words) and with 6 the next
++  // sample of the row (+1 word). In the sample space of the render target these are +1 in y and +1 in x.
++  uint source_tile_index = tile_number - pc.source_base_tiles;
++  // floor(index / pitch) of a tile index below 2048 by a pitch up to 1023 through a float division: (index + 0.5) / pitch never reaches the next integer by more than 2^-11.
++  uint source_tile_y = uint((float(source_tile_index) + 0.5) / float(pc.source_pitch_tiles));
++  uint source_tile_x = source_tile_index - source_tile_y * pc.source_pitch_tiles;
++  uint source_sample_x = tile_width * source_tile_x + in_tile.x;
++  uint source_sample_y = tile_height * source_tile_y + in_tile.y;
++
++  // precise: the original evaluates the unpacking, the sum of the samples in the order A + B + C + D and the multiplication by the exponent bias as written (its unpacking and
++  // averaging sit in separate branches of format and sample select switches, where no compiler can fuse or reassociate them). Fully inlined for one source kind, the same
++  // expressions would be contracted into fused multiply-adds and regrouped by the compiler of the driver: results differ in the last bit of the float (host test: millions of words
++  // with a 32-bit float destination from an 8:8:8:8 source). The conversion to the destination format is not precise: there the original is straight-line code too.
++  precise vec4 p = ColorAt(source_sample_x, source_sample_y);
++  float factor = bias_factor;
++  if (sample_select >= 4u) {
++    p += ColorAt(source_sample_x, source_sample_y + 1u);
++    factor = bias_factor * 0.5;
++    if (sample_select >= 6u) {
++      p += ColorAt(source_sample_x + 1u, source_sample_y);
++      p += ColorAt(source_sample_x + 1u, source_sample_y + 1u);
++      factor = bias_factor * 0.25;
++    }
++  }
++  p *= factor;
++  if (swap_red_blue) {
++    p = p.zyxw;
++  }
++
++  uvec2 dest_position = pixel_xy + dest_offset_scaled;
++  uint dest_group = dest_position.x >> uint(GROUP_LOG2);
++  uvec2 guest = uvec2(dest_group, dest_position.y) / scale;
++  uint guest_x = guest.x << uint(GROUP_LOG2);
++  uint guest_y = guest.y;
++  uint tiled;
++  if (!is_3d) {
++    tiled = TiledOffset2D(int(guest_x), int(guest_y), int(pitch_texels >> 5u));
++  } else {
++    tiled = TiledOffset3D(ivec3(int(guest_x), int(guest_y), int(slice)), int(pitch_texels >> 5u), int(height_texels >> 4u));
++  }
++  uvec2 remainder = uvec2(dest_group, dest_position.y) - guest * scale;
++  uint block = scale.x * scale.y;
++  uint within = ((remainder.x * scale.y + remainder.y) << uint(GROUP_LOG2)) + (dest_position.x & ((1u << uint(GROUP_LOG2)) - 1u));
++  uint byte_offset = tiled * block + (within << uint(BPB_LOG2));
++#if DEST_BPP == 32
++  dest[byte_offset >> 2u] = SwapEndian(ConvertPixel(dest_format, p), endian);
++#else
++  dest[byte_offset >> 3u] = SwapEndian(ConvertPixel(dest_format, p), endian);
++#endif
++}
++#endif  // THREAD_PIXELS
+ )GLSL";
+ const char kRcompFusedVerifySnapshotGlsl[] = R"GLSL(#version 450
+ // Verification of the fused resolve (rcomp_fused_resolve_verify): copies the words of the resolve's destination range into the scratch buffer before the resolve writes it.
+@@ -7126,7 +7752,10 @@
+   };
+   // The fused shader replaces the 32-bit fast copy of 1x and 2x surfaces (the 4x copy and the conversions of the full copies are other shaders), at the scaled resolution (the
+   // destination of a scaled resolve is the scaled resolve buffer).
+-  if (copy_shader != draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA) {
++  const bool full_copy = copy_shader == draw_util::ResolveCopyShaderIndex::kFull32bpp ||
++                         copy_shader == draw_util::ResolveCopyShaderIndex::kFull64bpp;
++  if (copy_shader != draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA &&
++      !(full_copy && REXCVAR_GET(rcomp_fused_resolve_full_mask) != 0)) {
+     return reject(kFusedRejectCopyShader);
+   }
+   if (!IsDrawResolutionScaled()) {
+@@ -7161,13 +7790,36 @@
+       copying_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+   // The render target and the copy must agree about depth and about the MSAA mode (the dump's sample mask is made for the copy's samples), the target be a 1x or 2x 32-bit one.
+   if (bool(key.is_depth) != copying_depth || uint32_t(key.msaa_samples) != uint32_t(edram_info.msaa_samples) ||
+-      key.msaa_samples >= xenos::MsaaSamples::k4X || key.Is64bpp() || !key.GetPitchTiles()) {
++      (!full_copy && key.msaa_samples >= xenos::MsaaSamples::k4X) || key.Is64bpp() || !key.GetPitchTiles()) {
+     return reject(kFusedRejectRenderTarget);
+   }
+   DumpPipelineKey pipeline_key;
+   pipeline_key.msaa_samples = key.msaa_samples;
+   pipeline_key.resource_format = key.resource_format;
+   pipeline_key.is_depth = key.is_depth;
++  if (full_copy) {
++    // The full copies: color only, the render target is the format of the copy's EDRAM info, and the samples the copy reads must all lie in the tiles the dump of the target covers
++    // (1x: sample 0; 2x: 0, 1 or their average; 4x: any - see fused_full.comp).
++    const uint32_t sample_select = uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select);
++    const bool select_ok = key.msaa_samples == xenos::MsaaSamples::k1X
++                               ? sample_select == uint32_t(xenos::CopySampleSelect::k0)
++                               : key.msaa_samples == xenos::MsaaSamples::k2X
++                                     ? (sample_select == uint32_t(xenos::CopySampleSelect::k0) ||
++                                        sample_select == uint32_t(xenos::CopySampleSelect::k1) ||
++                                        sample_select == uint32_t(xenos::CopySampleSelect::k01))
++                                     : true;
++    const auto is_float_2_10_10_10 = [](uint32_t format) {
++      return format == uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT) ||
++             format == uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16);
++    };
++    const uint32_t key_format = uint32_t(key.GetColorFormat());
++    const bool format_ok = uint32_t(edram_info.format) == key_format ||
++                           (is_float_2_10_10_10(uint32_t(edram_info.format)) && is_float_2_10_10_10(key_format));
++    if (copying_depth || key.is_depth || edram_info.format_is_64bpp || !format_ok || !select_ok) {
++      return reject(kFusedRejectFormat);
++    }
++    pipeline_key.key |= (copy_shader == draw_util::ResolveCopyShaderIndex::kFull64bpp ? 2u : 1u) << 16;
++  }
+   bool unsupported = false;
+   VkPipeline pipeline = GetFusedResolvePipeline(pipeline_key, unsupported);
+   if (pipeline == VK_NULL_HANDLE) {
+@@ -7191,6 +7843,9 @@
+     return entry_it->second.pipeline;
+   }
+   FusedPipelineEntry entry;
++  // Bits 16..19 of the key (not part of the dump key): 0 = the fast 32-bit copy, 1 = the full copy of a 32-bit destination, 2 = the full copy of a 64-bit destination.
++  const uint32_t full_dest = key.key >> 16;
++  key.key &= 0xFFFFu;
+   // The variants the fused shader reproduces and the host test covered (tools/host_gpu_bench/fused_resolve/fused_resolve_bench.cpp): 8:8:8:8, 2:10:10:10 float, 32-bit float, depth with 24-bit float.
+   uint32_t kind = 0, depth_format = 0;
+   bool source_is_uint = false;
+@@ -7218,6 +7873,14 @@
+         break;
+     }
+   }
++  if (full_dest) {
++    // The kinds enabled by rcomp_fused_resolve_full_mask (kind 1 = 8:8:8:8, 4 = 32-bit float, 3 = float 2:10:10:10).
++    const int32_t mask = REXCVAR_GET(rcomp_fused_resolve_full_mask);
++    const uint32_t bit = kind == 1 ? 1u : kind == 4 ? 2u : kind == 3 ? (full_dest == 2 ? 8u : 4u) : 0u;
++    if (key.is_depth || !(uint32_t(mask) & bit)) {
++      entry.unsupported = true;
++    }
++  }
+   if (!entry.unsupported) {
+     char defines[640];
+     std::snprintf(defines, sizeof defines,
+@@ -7228,7 +7891,14 @@
+                   draw_util::GetD3D10SampleIndexForGuest2xMSAA(0, msaa_2x_attachments_supported_),
+                   draw_util::GetD3D10SampleIndexForGuest2xMSAA(1, msaa_2x_attachments_supported_));
+     std::string source = defines;
+-    source += kRcompFusedResolveFast32Glsl;
++    if (full_dest) {
++      char full_defines[160];
++      std::snprintf(full_defines, sizeof full_defines, "#define DEST_BPP %u\n", full_dest == 2 ? 64u : 32u);
++      source += full_defines;
++      source += kRcompFusedResolveFullGlsl;
++    } else {
++      source += kRcompFusedResolveFast32Glsl;
++    }
+     std::vector<uint32_t> spirv;
+     std::string error;
+     if (!command_processor_.CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, source, spirv, error)) {
+@@ -7241,11 +7911,12 @@
+       if (entry.pipeline == VK_NULL_HANDLE) {
+         REXGPU_ERROR("VulkanRenderTargetCache: Failed to create the fused resolve pipeline");
+       } else {
+-        std::fprintf(stderr, "RCOMP-FUSED-RESOLVE pipeline depth=%u format=%u msaa=%u kind=%u uint=%u words=%zu\n", unsigned(key.is_depth),
+-                     unsigned(key.resource_format), unsigned(key.msaa_samples), kind, unsigned(source_is_uint), spirv.size());
++        std::fprintf(stderr, "RCOMP-FUSED-RESOLVE pipeline depth=%u format=%u msaa=%u kind=%u uint=%u full=%u words=%zu\n", unsigned(key.is_depth),
++                     unsigned(key.resource_format), unsigned(key.msaa_samples), kind, unsigned(source_is_uint), full_dest, spirv.size());
+       }
+     }
+   }
++  key.key |= full_dest << 16;
+   fused_resolve_pipelines_.emplace(key, entry);
+   unsupported_out = entry.unsupported;
+   return entry.pipeline;

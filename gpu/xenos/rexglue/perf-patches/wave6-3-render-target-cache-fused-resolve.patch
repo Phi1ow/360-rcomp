@@ -1,0 +1,1057 @@
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -809,6 +809,50 @@
+                               draw_util::ResolveCopyShaderIndex copy_shader,
+                               bool draw_resolution_scaled);
+ 
++  // R-comp: fused dump + resolve copy. One compute pass reads the host render target image and writes the resolve destination - what the SDK's copy shader does after a dump pass has
++  // filled the EDRAM buffer from the same image - when a single render target covers the whole resolved area and the copy is the 32-bit fast one (see PlanFusedResolve).
++  struct FusedResolvePlan {
++    VulkanRenderTarget* render_target = nullptr;
++    VkPipeline pipeline = VK_NULL_HANDLE;
++    uint32_t source_base_tiles = 0;
++    uint32_t source_pitch_tiles = 0;
++    uint32_t span_first_tile = 0;
++  };
++  struct FusedPipelineEntry {
++    VkPipeline pipeline = VK_NULL_HANDLE;
++    bool unsupported = false;
++  };
++  enum FusedRejectReason : uint32_t {
++    kFusedRejectCopyShader,
++    kFusedRejectNotScaled,
++    kFusedRejectWrap,
++    kFusedRejectRectangles,
++    kFusedRejectCoverage,
++    kFusedRejectRenderTarget,
++    kFusedRejectFormat,
++    kFusedRejectPipeline,
++    kFusedRejectCount,
++  };
++  bool PlanFusedResolve(const draw_util::ResolveInfo& resolve_info,
++                        draw_util::ResolveCopyShaderIndex copy_shader, FusedResolvePlan& plan_out);
++  VkPipeline GetFusedResolvePipeline(DumpPipelineKey key, bool& unsupported_out);
++  void RecordFusedResolve(const FusedResolvePlan& plan, VkDescriptorSet descriptor_set_dest,
++                          const draw_util::ResolveCopyShaderConstants& copy_constants,
++                          uint32_t group_count_x, uint32_t group_count_y);
++  // Verification (rcomp_fused_resolve_verify): the original two-pass path still writes the destination; the fused pass writes a scratch copy of the destination range, and a compare pass
++  // counts the words that differ, per resolve, into a results buffer that the command processor reads back later (RCOMP-FUSED-VERIFY lines).
++  bool EnsureFusedVerifyResources();
++  bool RecordFusedVerifyBegin(VulkanTextureCache& texture_cache, VkDescriptorSet descriptor_set_dest,
++                              uint64_t use_start, uint64_t use_length, uint64_t use_offset_in_binding,
++                              VkDescriptorSet& scratch_set_out, uint32_t& slot_out);
++  void RecordFusedVerifyEnd(VulkanTextureCache& texture_cache, const FusedResolvePlan& plan,
++                            VkDescriptorSet descriptor_set_dest, VkDescriptorSet scratch_set,
++                            const draw_util::ResolveCopyShaderConstants& copy_constants,
++                            uint32_t group_count_x, uint32_t group_count_y, uint64_t use_start,
++                            uint64_t use_length, uint64_t use_offset_in_binding, uint32_t slot);
++  void ScanFusedVerifyResults(uint32_t limit_slot);
++  void LogFusedStats();
++
+   // Writes contents of host render targets within rectangles from
+   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_. R-comp: sample_mask (bit i = guest sample
+   // index i) limits the dump of multisampled targets to the samples the resolve copy will read;
+@@ -898,6 +942,49 @@
+   uint64_t direct_resolve_success_count_ = 0;
+   uint64_t direct_resolve_fallback_count_ = 0;
+ 
++  // R-comp: the fused dump + resolve copy. Cvars read at initialization.
++  bool fused_resolve_enabled_ = false;
++  bool fused_resolve_verify_ = false;
++  // VK_NULL_HANDLE if failed to create (or unsupported format), stored not to try again.
++  std::unordered_map<DumpPipelineKey, FusedPipelineEntry, DumpPipelineKey::Hasher> fused_resolve_pipelines_;
++  struct FusedStats {
++    uint64_t attempts = 0;
++    uint64_t fused = 0;
++    uint64_t verify_resolves = 0;
++    uint64_t verify_skipped = 0;
++    uint64_t verify_mismatched = 0;
++    uint64_t verify_words = 0;
++    uint64_t rejected[kFusedRejectCount] = {};
++  } fused_stats_;
++  // Verification resources, created at the first verified resolve.
++  static constexpr uint32_t kFusedVerifySlots = 1u << 20;
++  static constexpr uint32_t kFusedVerifyInfoRing = 8192;
++  struct FusedVerifySlotInfo {
++    uint32_t frame = 0;
++    uint32_t render_target_key = 0;
++    uint32_t constants[4] = {};
++    uint32_t span_first_tile = 0;
++    uint32_t words = 0;
++  };
++  bool fused_verify_ready_ = false;
++  bool fused_verify_failed_ = false;
++  VkBuffer fused_verify_scratch_ = VK_NULL_HANDLE;
++  VkDeviceMemory fused_verify_scratch_memory_ = VK_NULL_HANDLE;
++  VkDeviceSize fused_verify_scratch_size_ = 0;
++  VkBuffer fused_verify_results_ = VK_NULL_HANDLE;
++  VkDeviceMemory fused_verify_results_memory_ = VK_NULL_HANDLE;
++  VkDeviceSize fused_verify_results_memory_size_ = 0;
++  uint32_t* fused_verify_results_mapped_ = nullptr;
++  bool fused_verify_results_coherent_ = true;
++  VkDescriptorPool fused_verify_pool_ = VK_NULL_HANDLE;
++  VkDescriptorSet fused_verify_results_set_ = VK_NULL_HANDLE;
++  VkPipelineLayout fused_verify_pipeline_layout_ = VK_NULL_HANDLE;
++  VkPipeline fused_verify_snapshot_pipeline_ = VK_NULL_HANDLE;
++  VkPipeline fused_verify_compare_pipeline_ = VK_NULL_HANDLE;
++  std::vector<FusedVerifySlotInfo> fused_verify_slot_info_;
++  uint32_t fused_verify_next_slot_ = 0;
++  uint32_t fused_verify_scan_next_ = 0;
++
+   // For pixel (fragment) shader interlock.
+ 
+   VkRenderPass fsi_render_pass_ = VK_NULL_HANDLE;
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -55,6 +55,366 @@
+ REXCVAR_DEFINE_BOOL(rcomp_dump_sample_mask, true, "GPU/Vulkan",
+                     "Dump only the multisample samples that the resolve copy will read")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp MEASUREMENT ONLY, never a default (the picture is wrong): ignore the dump of the render targets into the EDRAM buffer, or the resolve copy from it. The frame rate of an arm that
++// skips the dump bounds what a fused dump + copy (one pass from the render target image to the destination) can gain.
++REXCVAR_DEFINE_BOOL(rcomp_diag_skip_resolve_dump, false, "GPU/Vulkan",
++                    "MEASUREMENT ONLY: do not dump the render targets for a resolve (the resolve copies stale EDRAM data)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(rcomp_diag_skip_resolve_copy, false, "GPU/Vulkan",
++                    "MEASUREMENT ONLY: do not run the resolve copy compute shaders (the destination keeps its old contents)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp diagnostic: log the SPIR-V of each render target dump pipeline once (RCOMP-DUMP-SPIRV lines), the reference of the host test of a fused dump + copy resolve.
++REXCVAR_DEFINE_BOOL(rcomp_diag_log_dump_spirv, false, "GPU/Vulkan",
++                    "DIAGNOSTIC: write the SPIR-V of every render target dump pipeline to the log as hexadecimal words")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp: the resolve of a render target into a texture is a dump of the target's image into the EDRAM buffer (a pass that reads the image and writes the buffer) followed by the copy shader
++// (reads the buffer, writes the texture's memory); with this option the common case - one render target covers the whole resolved area, the copy is the 32-bit fast one, the format is one the
++// fused shader reproduces (8:8:8:8, 32-bit float, 2:10:10:10 float, depth with 24-bit float) - is one pass from the image to the destination, bit-identical (host test against the title's own
++// dump and copy shaders) and without the write and the read of the EDRAM buffer. Everything else keeps the two passes.
++REXCVAR_DEFINE_BOOL(rcomp_fused_resolve, false, "GPU/Vulkan",
++                    "Fuse the render target dump and the resolve copy into one pass for the resolves that allow it")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++// R-comp diagnostic: with rcomp_fused_resolve, the fused pass writes a scratch copy of the destination and a compare pass counts the words that differ from what the two-pass path wrote
++// (which stays the one that writes the destination). The reports are RCOMP-FUSED-VERIFY lines. Costs a lot of GPU time: for validation arms only.
++REXCVAR_DEFINE_BOOL(rcomp_fused_resolve_verify, false, "GPU/Vulkan",
++                    "DIAGNOSTIC: verify the fused resolve against the two-pass path word by word on the GPU (needs rcomp_fused_resolve)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++namespace {
++// The fused dump + resolve copy shader (fast 32-bit copy): see gpu/xenos/rexglue/perf-patches and tools/host_gpu_bench/fused_resolve/fused_resolve_bench.cpp. The source is the one the host test
++// compiled; the #version and #extension lines and the variant #define lines are written in front of it by GetFusedResolvePipeline.
++const char kRcompFusedResolveFast32Glsl[] = R"GLSL(// Fused render target dump + resolve copy for the 32-bit "fast" copy (resolve_fast_32bpp_1x2xmsaa_scaled_cs of the Xenos GPU subsystem): the copy shader of the SDK reads the EDRAM
++// buffer that a dump pass has just filled from the host render target image; this shader reads the image itself and writes the destination in the one pass. The body after the
++// EDRAM read is the verified transcription of the copy shader (host test: 300 random parameter sets on two GPUs, bit-identical destination); what replaces the EDRAM read is
++// the dump shader's arithmetic run backwards: the EDRAM sample address -> the tile of the render target -> its pixel and sample -> the packed 32-bit value the dump would have
++// stored there. Compile-time variant parameters (the caller prepends the #define lines):
++//   SCALE_X, SCALE_Y   draw resolution scale
++//   SRC_MSAA           guest MSAA of the render target: 0 = 1x, 1 = 2x, 2 = 4x
++//   SRC_IS_DEPTH       1 = depth + stencil render target, 0 = color
++//   SRC_KIND           color source kind: 1 = 8:8:8:8, 2 = 2:10:10:10, 3 = 2:10:10:10 float (7e3 from a half float image), 4 = 32-bit float bits
++//   SRC_UINT           1 = the color image is sampled as unsigned integers (32-bit float kept as bits), 0 = as floats
++//   DEPTH_FORMAT       0 = D24S8 (depth * 0xFFFFFF), 1 = D24FS8 (20e4 float)
++//   DEPTH_ROUND        1 = round the 20e4 conversion to nearest even (device option depth_float24_round)
++//   HOST_2X_SAMPLE_0, HOST_2X_SAMPLE_1   host sample index of guest samples 0 and 1 of a 2x surface
++// Everything the dump shader does for these formats is reproduced; formats it handles that this does not (16-bit pairs, gamma as unorm16, 64-bit) are not variants.
++layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
++
++layout(push_constant) uniform PushConstants {
++  uint edram_info;
++  uint coordinate_info;
++  uint dest_info;
++  uint dest_coordinate_info;
++  uint dest_base;            // unused: the scaled resolve destination is addressed relative to the bound range
++  uint source_base_tiles;    // the render target's base tile
++  uint source_pitch_tiles;   // the render target's pitch in tiles
++  uint dispatch_first_tile;  // unused
++} pc;
++
++layout(std430, set = 0, binding = 0) writeonly buffer DestBuffer { uvec4 dest[]; };
++
++#if SRC_MSAA == 0
++#define SRC_TEXTURE_2D texture2D
++#define USRC_TEXTURE_2D utexture2D
++#define FETCH(tex, p, s) texelFetch(tex, p, 0)
++#else
++#define SRC_TEXTURE_2D texture2DMS
++#define USRC_TEXTURE_2D utexture2DMS
++#define FETCH(tex, p, s) texelFetch(tex, p, s)
++#endif
++
++#if SRC_IS_DEPTH
++layout(set = 1, binding = 0) uniform SRC_TEXTURE_2D source_depth;
++layout(set = 1, binding = 1) uniform USRC_TEXTURE_2D source_stencil;
++#elif SRC_UINT
++layout(set = 1, binding = 0) uniform USRC_TEXTURE_2D source_color;
++#else
++layout(set = 1, binding = 0) uniform SRC_TEXTURE_2D source_color;
++#endif
++
++// ---- the conversions of the dump shader (VulkanRenderTargetCache::GetDumpPipeline and SpirvShaderTranslator)
++
++uint PreClampedFloat32To7e3(float f32) {
++  uint bits = floatBitsToUint(f32);
++  uint denormal_biased = bitfieldInsert(bits, 1u, 23, 9);
++  denormal_biased >>= min(125u - (bits >> 23), 24u);
++  uint normal_biased = bits - (124u << 23);
++  uint biased = (bits < 0x3E800000u) ? denormal_biased : normal_biased;
++  return bitfieldExtract(biased + 0x7FFFu + bitfieldExtract(biased, 16, 1), 16, 10);
++}
++
++uint UnclampedFloat32To7e3(float f32) {
++  // NClamp(f32, 0, 31.875): a NaN becomes 0.
++  float clamped = isnan(f32) ? 0.0 : min(max(f32, 0.0), 31.875);
++  return PreClampedFloat32To7e3(clamped);
++}
++
++uint PreClampedDepthTo20e4(float f32) {
++  // Round to nearest even or toward zero, the 0...1 depth remapped to 0...0.5 (remap bias 1).
++  uint bits = floatBitsToUint(f32);
++  uint denormal_biased = bitfieldInsert(bits, 1u, 23, 9);
++  denormal_biased >>= min(112u - (bits >> 23), 24u);
++  uint normal_biased = bits - (111u << 23);
++  uint biased = (bits < 0x38000000u) ? denormal_biased : normal_biased;
++#if DEPTH_ROUND
++  biased += 3u + bitfieldExtract(biased, 3, 1);
++#endif
++  return bitfieldExtract(biased, 3, 24);
++}
++
++// The packed 32-bit EDRAM word of one sample of the render target.
++uint PackedSample(ivec2 pixel, int sample_index) {
++#if SRC_IS_DEPTH
++  float depth = FETCH(source_depth, pixel, sample_index).x;
++  uint stencil = FETCH(source_stencil, pixel, sample_index).x;
++#if DEPTH_FORMAT == 0
++  uint depth24 = uint(roundEven(depth * 16777215.0));
++#else
++  uint depth24 = PreClampedDepthTo20e4(depth);
++#endif
++  return bitfieldInsert(stencil, depth24, 8, 24);
++#elif SRC_KIND == 1
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uvec4 u = uvec4(c * 255.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(u.x, u.y, 8, 8), u.z, 16, 8), u.w, 24, 8);
++#elif SRC_KIND == 2
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uint r = uint(c.x * 1023.0 + 0.5), g = uint(c.y * 1023.0 + 0.5), b = uint(c.z * 1023.0 + 0.5), a = uint(c.w * 3.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(r, g, 10, 10), b, 20, 10), a, 30, 2);
++#elif SRC_KIND == 3
++  vec4 c = FETCH(source_color, pixel, sample_index);
++  uint r = UnclampedFloat32To7e3(c.x), g = UnclampedFloat32To7e3(c.y), b = UnclampedFloat32To7e3(c.z);
++  float alpha = isnan(c.w) ? 0.0 : min(max(c.w, 0.0), 1.0);
++  uint a = uint(alpha * 3.0 + 0.5);
++  return bitfieldInsert(bitfieldInsert(bitfieldInsert(r, g, 10, 10), b, 20, 10), a, 30, 2);
++#else  // SRC_KIND == 4
++#if SRC_UINT
++  return FETCH(source_color, pixel, sample_index).x;
++#else
++  return floatBitsToUint(FETCH(source_color, pixel, sample_index).x);
++#endif
++#endif
++}
++
++// A sample of the render target in the sample space of its tiles (80x16 samples at 1x scale per tile), as the dump shader splits it into the pixel and the host sample.
++uint PackedSampleAt(uint sample_x, uint sample_y) {
++#if SRC_MSAA == 0
++  return PackedSample(ivec2(int(sample_x), int(sample_y)), 0);
++#elif SRC_MSAA == 1
++  return PackedSample(ivec2(int(sample_x), int(sample_y >> 1)), (sample_y & 1u) != 0u ? HOST_2X_SAMPLE_1 : HOST_2X_SAMPLE_0);
++#else
++  return PackedSample(ivec2(int(sample_x >> 1), int(sample_y >> 1)), int((sample_x & 1u) | ((sample_y & 1u) << 1)));
++#endif
++}
++
++// ---- the copy shader
++
++uint TiledOffset2D(int x, int y, int pitch32) {
++  int macro_tile = (x >> 5) + (y >> 5) * pitch32;
++  int t = macro_tile << 9;
++  int a = (x & 7) + ((y & 14) << 2);
++  int b = a << 2;
++  int c = (b & -16) << 1;
++  int d = t + c + (b & 15);
++  int e = d + ((y & 1) << 4);
++  int f = ((e & -512) << 3) + ((y & 16) << 7) + ((e & 448) << 2);
++  int g = f + ((((y & 8) >> 2) + (x >> 3)) & 3) * 64;
++  return uint(g + (e & 63));
++}
++
++uint TiledOffset3D(ivec3 p, int pitch32, int height16) {
++  int y16 = p.y >> 4;
++  int z4 = p.z >> 2;
++  int index = ((y16 + z4 * height16) * pitch32);
++  int x32 = (p.x >> 5) + index;
++  int a = (x32 << 8) & 0x0FFFFFFF;
++  int a2 = a << 1;
++  int b = (p.x & 7) + ((p.y & 6) << 2);
++  int b2 = (b << 8) >> 6;
++  int bank = ((p.y >> 3) + z4) & 1;
++  int c = (p.x >> 3) + (bank << 1);
++  int d = c & 3;
++  int e = bank + (d << 1);
++  int f = (b2 & -16) + a2;
++  int g = (f << 1) + (b2 & 15);
++  int h = g + ((p.z & 3) << 8) + ((p.y & 1) << 4);
++  int pipe = ((e & 1) << 3) + ((h >> 6) & 7);
++  int i = (((pipe << 3) + (e & -2)) << 2) + (h & -512);
++  return uint((i << 3) + (h & 63));
++}
++
++uint Swap8In16(uint v) { return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8); }
++uint Swap16In32(uint v) { return (v << 16) | (v >> 16); }
++
++void main() {
++  uint c0 = pc.edram_info, c1 = pc.coordinate_info, c2 = pc.dest_info, c3 = pc.dest_coordinate_info;
++
++  uint edram_pitch_tiles = c0 & 1023u;
++  uint msaa = (c0 >> 10) & 3u;
++  bool is_depth = (c0 & 4096u) != 0u;
++  uint edram_base_tiles = (c0 >> 13) & 2047u;
++  uint format = (c0 >> 24) & 15u;
++  bool duplicate_second_pixel = (c0 & 0x20000000u) != 0u;
++
++  uvec2 scale = (uvec2(c1) >> uvec2(16u, 19u)) & uvec2(7u);
++  uvec2 duplicate = duplicate_second_pixel ? (scale >> 1u) : uvec2(0u);
++  uvec2 region_offset = ((uvec2(c1) >> uvec2(0u, 4u)) & uvec2(15u, 1u)) << 3u;
++  uvec2 region_offset_scaled = region_offset * scale;
++  uint width_threads = ((c1 >> 5u) & 2047u) * scale.x;
++
++  uint endian = c2 & 7u;
++  bool is_3d = (c2 & 8u) != 0u;
++  uint slice = (c2 >> 4u) & 7u;
++  bool swap_red_blue = (c2 & 0x1000000u) != 0u;
++
++  uint pitch_texels = (c3 & 1023u) << 5u;
++  uint height_texels = ((c3 >> 10u) & 1023u) << 5u;
++  uvec2 dest_offset_scaled = (((uvec2(c3) >> uvec2(20u, 24u)) & uvec2(15u)) << 3u) * scale;
++  uint sample_select = (c3 >> 28u) & 7u;
++
++  uint thread_x = gl_GlobalInvocationID.x;
++  if (thread_x >= width_threads) {
++    return;
++  }
++
++  uvec2 sample_xy = uvec2(gl_GlobalInvocationID.xy) << uvec2(3u, 0u);
++  uvec2 position = uvec2(sample_xy.x, max(sample_xy.y, duplicate.y)) + region_offset_scaled;
++
++  uint sample_index;
++  if (sample_select <= 3u) {
++    sample_index = sample_select;
++  } else {
++    sample_index = (sample_select == 5u) ? 2u : 0u;
++  }
++  uvec2 msaa_shift = uvec2(msaa >= 2u ? 1u : 0u, msaa >= 1u ? 1u : 0u);
++  uvec2 sample_position = (position << msaa_shift) + ((uvec2(sample_index) >> uvec2(1u, 0u)) & uvec2(1u));
++
++  const uint tile_width = 80u * uint(SCALE_X);
++  const uint tile_height = 16u * uint(SCALE_Y);
++  uvec2 tile_dims = uvec2(tile_width, tile_height);
++  uvec2 tile = sample_position / tile_dims;
++  uint tile_number = edram_base_tiles + tile.y * edram_pitch_tiles + tile.x;
++  uvec2 in_tile = sample_position - tile * tile_dims;
++
++  // The copy reads two groups of four EDRAM words: the aligned group that holds its column (the low two bits of a column that a sample select of 2 or 3 offsets by one are dropped by
++  // the original's word index) and the next one, so eight columns from one tile of the render target (a group never straddles the half of the depth row, 40 columns times the scale).
++  // The depth halves of the row are swapped once by the dump when it stores and once by the copy when it loads, so the render target is read at the copy's own column unless the
++  // render target and the copy disagree about depth.
++  uint half_width = tile_width >> 1u;
++  uint x_edram = is_depth ? uint(int(in_tile.x) + (in_tile.x >= half_width ? -int(half_width) : int(half_width))) : in_tile.x;
++  x_edram &= ~3u;
++  uint x_source = (SRC_IS_DEPTH != 0) ? uint(int(x_edram) + (x_edram >= half_width ? -int(half_width) : int(half_width))) : x_edram;
++  uint source_tile_index = tile_number - pc.source_base_tiles;
++  uint source_tile_y = source_tile_index / pc.source_pitch_tiles;
++  uint source_tile_x = source_tile_index - source_tile_y * pc.source_pitch_tiles;
++  uint source_sample_x = tile_width * source_tile_x + x_source;
++  uint source_sample_y = tile_height * source_tile_y + in_tile.y;
++  uvec4 first = uvec4(PackedSampleAt(source_sample_x + 0u, source_sample_y), PackedSampleAt(source_sample_x + 1u, source_sample_y),
++                      PackedSampleAt(source_sample_x + 2u, source_sample_y), PackedSampleAt(source_sample_x + 3u, source_sample_y));
++  uvec4 second = uvec4(PackedSampleAt(source_sample_x + 4u, source_sample_y), PackedSampleAt(source_sample_x + 5u, source_sample_y),
++                       PackedSampleAt(source_sample_x + 6u, source_sample_y), PackedSampleAt(source_sample_x + 7u, source_sample_y));
++
++  if (sample_xy.x == 0u && duplicate.x != 0u) {
++    if (duplicate.x >= 2u) {
++      if (duplicate.x >= 3u) {
++        first.z = first.w;
++      }
++      first.y = first.z;
++    }
++    first.x = first.y;
++  }
++
++  if (swap_red_blue) {
++    if (format == 0u || format == 1u) {
++      first = (first & 0xFF00FF00u) | ((first & 255u) << 16u) | ((first >> 16u) & 255u);
++      second = (second & 0xFF00FF00u) | ((second & 255u) << 16u) | ((second >> 16u) & 255u);
++    } else if (format == 2u || format == 3u || format == 10u || format == 12u) {
++      first = (first & 0xC00FFC00u) | ((first & 1023u) << 20u) | ((first >> 20u) & 1023u);
++      second = (second & 0xC00FFC00u) | ((second & 1023u) << 20u) | ((second >> 20u) & 1023u);
++    }
++  }
++
++  uvec2 dest_position = sample_xy + dest_offset_scaled;
++  uint dest_x4 = dest_position.x >> 2u;
++  uvec2 guest = uvec2(dest_x4, dest_position.y) / scale;
++  uint guest_x = guest.x << 2u;
++  uint guest_y = guest.y;
++  uint tiled;
++  if (!is_3d) {
++    tiled = TiledOffset2D(int(guest_x), int(guest_y), int(pitch_texels >> 5u));
++  } else {
++    tiled = TiledOffset3D(ivec3(int(guest_x), int(guest_y), int(slice)), int(pitch_texels >> 5u), int(height_texels >> 4u));
++  }
++  uvec2 remainder = uvec2(dest_x4, dest_position.y) - guest * scale;
++  uint block = scale.x * scale.y;
++  uint within = ((remainder.x * scale.y + remainder.y) << 2u) + (dest_position.x & 3u);
++  uint byte_offset = tiled * block + (within << 2u);
++  uint first_index = byte_offset >> 4u;
++
++  uint second_step;
++  if (scale.x > 1u) {
++    uint x4 = sample_xy.x >> 2u;
++    uint x4_remainder = x4 - (x4 / scale.x) * scale.x;
++    second_step = (x4_remainder + 1u == scale.x) ? (32u * scale.x - (x4_remainder << 4u)) : 16u;
++  } else {
++    second_step = 32u;
++  }
++  uint second_index = first_index + ((second_step * scale.y) >> 4u);
++
++  if (endian == 1u || endian == 2u) {
++    first = uvec4(Swap8In16(first.x), Swap8In16(first.y), Swap8In16(first.z), Swap8In16(first.w));
++    second = uvec4(Swap8In16(second.x), Swap8In16(second.y), Swap8In16(second.z), Swap8In16(second.w));
++  }
++  if (endian == 2u || endian == 3u) {
++    first = uvec4(Swap16In32(first.x), Swap16In32(first.y), Swap16In32(first.z), Swap16In32(first.w));
++    second = uvec4(Swap16In32(second.x), Swap16In32(second.y), Swap16In32(second.z), Swap16In32(second.w));
++  }
++  dest[first_index] = first;
++  dest[second_index] = second;
++}
++)GLSL";
++const char kRcompFusedVerifySnapshotGlsl[] = R"GLSL(#version 450
++// Verification of the fused resolve (rcomp_fused_resolve_verify): copies the words of the resolve's destination range into the scratch buffer before the resolve writes it.
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++layout(std430, set = 0, binding = 0) readonly buffer RealDestination { uint real[]; };
++layout(std430, set = 1, binding = 0) writeonly buffer Scratch { uint scratch[]; };
++layout(push_constant) uniform PushConstants {
++  uint words;
++  uint word_offset;
++  uint slot;
++} pc;
++void main() {
++  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * (4096u * 256u);
++  if (i < pc.words) {
++    scratch[pc.word_offset + i] = real[pc.word_offset + i];
++  }
++}
++)GLSL";
++const char kRcompFusedVerifyCompareGlsl[] = R"GLSL(#version 450
++// Verification of the fused resolve (rcomp_fused_resolve_verify): counts the words of the resolve's destination range that differ between what the original two-pass path wrote
++// (the real destination) and what the fused pass wrote (the scratch copy). Per slot: results[2 * slot] = number of differing words, results[2 * slot + 1] = ~(lowest differing
++// word index), 0 while nothing differs.
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++layout(std430, set = 0, binding = 0) readonly buffer RealDestination { uint real[]; };
++layout(std430, set = 1, binding = 0) readonly buffer Scratch { uint scratch[]; };
++layout(std430, set = 2, binding = 0) buffer Results { uint results[]; };
++layout(push_constant) uniform PushConstants {
++  uint words;
++  uint word_offset;
++  uint slot;
++} pc;
++void main() {
++  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * (4096u * 256u);
++  if (i >= pc.words) {
++    return;
++  }
++  uint index = pc.word_offset + i;
++  if (real[index] != scratch[index]) {
++    atomicAdd(results[pc.slot * 2u], 1u);
++    atomicMax(results[pc.slot * 2u + 1u], ~index);
++  }
++}
++)GLSL";
++}  // namespace
+ 
+ // DEFINE_string(
+ //     render_target_path_vulkan, "",
+@@ -234,6 +594,11 @@
+ 
+   early_rt_barrier_ = REXCVAR_GET(rcomp_early_rt_barrier);
+   dump_sample_mask_enabled_ = REXCVAR_GET(rcomp_dump_sample_mask);
++  fused_resolve_enabled_ = REXCVAR_GET(rcomp_fused_resolve);
++  fused_resolve_verify_ = fused_resolve_enabled_ && REXCVAR_GET(rcomp_fused_resolve_verify);
++  if (fused_resolve_enabled_) {
++    std::fprintf(stderr, "RCOMP-FUSED-RESOLVE on verify=%u\n", unsigned(fused_resolve_verify_));
++  }
+   if (early_rt_barrier_ || dump_sample_mask_enabled_) {
+     std::fprintf(stderr, "RCOMP-RESOLVE-OPTS early_rt_barrier=%u dump_sample_mask=%u\n", unsigned(early_rt_barrier_),
+                  unsigned(dump_sample_mask_enabled_));
+@@ -1050,6 +1415,26 @@
+     }
+   }
+   direct_resolve_pipelines_.clear();
++  for (const auto& fused_pipeline_pair : fused_resolve_pipelines_) {
++    if (fused_pipeline_pair.second.pipeline != VK_NULL_HANDLE) {
++      dfn.vkDestroyPipeline(device, fused_pipeline_pair.second.pipeline, nullptr);
++    }
++  }
++  fused_resolve_pipelines_.clear();
++  if (fused_verify_results_mapped_) {
++    ScanFusedVerifyResults(fused_verify_next_slot_);
++    LogFusedStats();
++    dfn.vkUnmapMemory(device, fused_verify_results_memory_);
++    fused_verify_results_mapped_ = nullptr;
++  }
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, fused_verify_compare_pipeline_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipeline, device, fused_verify_snapshot_pipeline_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device, fused_verify_pipeline_layout_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyDescriptorPool, device, fused_verify_pool_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, fused_verify_results_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, fused_verify_results_memory_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device, fused_verify_scratch_);
++  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device, fused_verify_scratch_memory_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+                                          direct_resolve_pipeline_layout_depth_);
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyPipelineLayout, device,
+@@ -1274,8 +1659,13 @@
+       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
+           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
+       bool direct_resolved = false;
++      FusedResolvePlan fused_plan;
++      bool fused_resolve = false;
+       if (GetPath() == Path::kHostRenderTargets) {
+-        if (REXCVAR_GET(direct_host_resolve)) {
++        // R-comp: the fused dump + copy plan comes first: the SDK's direct resolve preflight below runs the dump (the title runs with direct_host_resolve on). In verification both paths run.
++        fused_resolve = fused_resolve_enabled_ && PlanFusedResolve(resolve_info, copy_shader, fused_plan);
++        const bool fused_two_passes = !fused_resolve || fused_resolve_verify_;
++        if (fused_two_passes && REXCVAR_GET(direct_host_resolve)) {
+           direct_resolved =
+               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
+           if (direct_resolved) {
+@@ -1284,7 +1674,7 @@
+             ++direct_resolve_fallback_count_;
+           }
+         }
+-        if (!direct_resolved) {
++        if (!direct_resolved && fused_two_passes) {
+           // Dump the current contents of the render targets owning the affected
+           // range to edram_buffer_.
+           uint32_t dump_base;
+@@ -1370,7 +1760,7 @@
+           // pixels = destination bytes, tiles = dispatch groups.
+           RcompPassScope rcomp_pass_scope(
+               command_processor_,
+-              rcomp_pass::CopyClass(uint32_t(copy_shader), draw_resolution_scaled),
++              rcomp_pass::CopyClass((fused_resolve && !fused_resolve_verify_) ? 15u : uint32_t(copy_shader), draw_resolution_scaled),
+               copy_dest_use_length, copy_group_count_x * copy_group_count_y, 2);
+ #endif
+           // Submit the resolve.
+@@ -1381,6 +1771,20 @@
+                               std::pair<uint32_t, uint32_t>(uint32_t(copy_dest_use_start),
+                                                             uint32_t(copy_dest_use_length)));
+           }
++          const bool fused_only = fused_resolve && !fused_resolve_verify_;
++          VkDescriptorSet fused_verify_scratch_set = VK_NULL_HANDLE;
++          uint32_t fused_verify_slot = UINT32_MAX;
++          bool fused_verify_active = false;
++          if (fused_resolve && fused_resolve_verify_) {
++            fused_verify_active = RecordFusedVerifyBegin(
++                texture_cache, descriptor_set_dest, copy_dest_use_start, copy_dest_use_length,
++                copy_dest_use_start - copy_dest_base, fused_verify_scratch_set, fused_verify_slot);
++          }
++          if (fused_only) {
++            // R-comp: one pass from the render target image to the destination, no EDRAM buffer.
++            RecordFusedResolve(fused_plan, descriptor_set_dest, copy_shader_constants, copy_group_count_x,
++                               copy_group_count_y);
++          } else {
+           UseEdramBuffer(EdramBufferUsage::kComputeRead);
+           command_processor_.BindExternalComputePipeline(
+               resolve_copy_pipelines_[size_t(copy_shader)]);
+@@ -1430,7 +1834,17 @@
+             }
+           }
+ #endif
+-          command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
++          static const bool rcomp_skip_copy = REXCVAR_GET(rcomp_diag_skip_resolve_copy);
++          if (!rcomp_skip_copy) {
++            command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
++          }
++          }  // !fused_only
++          if (fused_verify_active) {
++            RecordFusedVerifyEnd(texture_cache, fused_plan, descriptor_set_dest, fused_verify_scratch_set,
++                                 copy_shader_constants, copy_group_count_x, copy_group_count_y,
++                                 copy_dest_use_start, copy_dest_use_length,
++                                 copy_dest_use_start - copy_dest_base, fused_verify_slot);
++          }
+ 
+           // Invalidate textures and mark the range as scaled if needed.
+           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+@@ -6345,6 +6759,24 @@
+   std::vector<unsigned int> shader_code;
+   builder.dump(shader_code);
+ 
++  if (REXCVAR_GET(rcomp_diag_log_dump_spirv)) {
++    // key: msaa 1x/2x/4x as 0/1/2, resource_format is the color or depth format number; the host formats and the device facts baked into the code.
++    std::fprintf(stderr,
++                 "RCOMP-DUMP-SPIRV depth=%u format=%u msaa=%u words=%zu vkformat=%u source_is_uint=%u native2x=%u unorm24=%u float24round=%u gamma16=%u scale=%ux%u\n",
++                 unsigned(key.is_depth), unsigned(key.resource_format), unsigned(key.msaa_samples), shader_code.size(),
++                 unsigned(key.is_depth ? GetDepthVulkanFormat(key.GetDepthFormat()) : GetColorVulkanFormat(key.GetColorFormat())),
++                 unsigned(source_is_uint), unsigned(msaa_2x_attachments_supported_), unsigned(depth_unorm24_vulkan_format_supported()),
++                 unsigned(depth_float24_round()), unsigned(gamma_render_target_as_unorm16_), draw_resolution_scale_x(), draw_resolution_scale_y());
++    for (size_t i = 0; i < shader_code.size(); i += 16) {
++      std::fprintf(stderr, "RCOMP-DUMP-SPIRV-DATA depth=%u format=%u msaa=%u at=%zu", unsigned(key.is_depth), unsigned(key.resource_format),
++                   unsigned(key.msaa_samples), i);
++      for (size_t j = i; j < shader_code.size() && j < i + 16; ++j) {
++        std::fprintf(stderr, " %08x", unsigned(shader_code[j]));
++      }
++      std::fprintf(stderr, "\n");
++    }
++  }
++
+   // Create the pipeline, and store the handle even if creation fails not to try
+   // to create it again later.
+   VkPipeline pipeline = ui::vulkan::util::CreateComputePipeline(
+@@ -6436,6 +6868,10 @@
+                                                 uint32_t dump_rows, uint32_t dump_pitch,
+                                                 uint32_t sample_mask) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
++  static const bool rcomp_skip_dump = REXCVAR_GET(rcomp_diag_skip_resolve_dump);
++  if (rcomp_skip_dump) {
++    return true;
++  }
+ 
+   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
+                                  dump_rectangles_);
+@@ -6637,4 +7073,436 @@
+   return all_pipelines_available;
+ }
+ 
++// ---- R-comp: fused dump + resolve copy (rcomp_fused_resolve) ----
++
++void VulkanRenderTargetCache::LogFusedStats() {
++  std::fprintf(stderr,
++               "RCOMP-FUSED-RESOLVE attempts=%llu fused=%llu verified=%llu verify_skipped=%llu verify_mismatched=%llu verify_words=%llu rejected: copy_shader=%llu not_scaled=%llu "
++               "wrap=%llu rectangles=%llu coverage=%llu render_target=%llu format=%llu pipeline=%llu\n",
++               (unsigned long long)fused_stats_.attempts, (unsigned long long)fused_stats_.fused, (unsigned long long)fused_stats_.verify_resolves,
++               (unsigned long long)fused_stats_.verify_skipped, (unsigned long long)fused_stats_.verify_mismatched, (unsigned long long)fused_stats_.verify_words,
++               (unsigned long long)fused_stats_.rejected[kFusedRejectCopyShader], (unsigned long long)fused_stats_.rejected[kFusedRejectNotScaled],
++               (unsigned long long)fused_stats_.rejected[kFusedRejectWrap], (unsigned long long)fused_stats_.rejected[kFusedRejectRectangles],
++               (unsigned long long)fused_stats_.rejected[kFusedRejectCoverage], (unsigned long long)fused_stats_.rejected[kFusedRejectRenderTarget],
++               (unsigned long long)fused_stats_.rejected[kFusedRejectFormat], (unsigned long long)fused_stats_.rejected[kFusedRejectPipeline]);
++}
++
++bool VulkanRenderTargetCache::PlanFusedResolve(const draw_util::ResolveInfo& resolve_info,
++                                               draw_util::ResolveCopyShaderIndex copy_shader,
++                                               FusedResolvePlan& plan_out) {
++  ++fused_stats_.attempts;
++  if ((fused_stats_.attempts & 0x3FFF) == 0) {
++    LogFusedStats();
++  }
++  auto reject = [&](FusedRejectReason reason) {
++    ++fused_stats_.rejected[reason];
++    static unsigned rejections_logged = 0;
++    if (rejections_logged < 24) {
++      ++rejections_logged;
++      static const char* const kReasonNames[kFusedRejectCount] = {"copy_shader", "not_scaled", "wrap", "rectangles", "coverage", "render_target", "format", "pipeline"};
++      std::fprintf(stderr, "RCOMP-FUSED-RESOLVE rejected: %s (copy shader %u)\n", kReasonNames[reason], unsigned(copy_shader));
++    }
++    return false;
++  };
++  // The fused shader replaces the 32-bit fast copy of 1x and 2x surfaces (the 4x copy and the conversions of the full copies are other shaders), at the scaled resolution (the
++  // destination of a scaled resolve is the scaled resolve buffer).
++  if (copy_shader != draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA) {
++    return reject(kFusedRejectCopyShader);
++  }
++  if (!IsDrawResolutionScaled()) {
++    return reject(kFusedRejectNotScaled);
++  }
++  uint32_t span_base, span_row_length, span_rows, span_pitch;
++  resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
++  if (!span_row_length || !span_rows || !span_pitch) {
++    return reject(kFusedRejectCoverage);
++  }
++  // No wrap of the EDRAM addressing: the render target's tile index is the span's tile index minus its base.
++  if (uint64_t(span_base) + uint64_t(span_rows - 1) * span_pitch + span_row_length > xenos::kEdramTileCount) {
++    return reject(kFusedRejectWrap);
++  }
++  // One render target must own every tile of the span, so that the dump would have written the whole span from that one image and nothing of the copy reads stale EDRAM data.
++  GetResolveCopyRectanglesToDump(span_base, span_row_length, span_rows, span_pitch, dump_rectangles_);
++  if (dump_rectangles_.size() != 1) {
++    return reject(kFusedRejectRectangles);
++  }
++  const ResolveCopyDumpRectangle& rectangle = dump_rectangles_[0];
++  if (rectangle.row_first != 0 || rectangle.rows != span_rows || rectangle.row_first_start != 0 ||
++      rectangle.row_last_end != span_row_length) {
++    return reject(kFusedRejectCoverage);
++  }
++  auto* render_target = static_cast<VulkanRenderTarget*>(rectangle.render_target);
++  if (!render_target) {
++    return reject(kFusedRejectRenderTarget);
++  }
++  const RenderTargetKey key = render_target->key();
++  const bool copying_depth = resolve_info.IsCopyingDepth();
++  const draw_util::ResolveEdramInfo edram_info =
++      copying_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
++  // The render target and the copy must agree about depth and about the MSAA mode (the dump's sample mask is made for the copy's samples), the target be a 1x or 2x 32-bit one.
++  if (bool(key.is_depth) != copying_depth || uint32_t(key.msaa_samples) != uint32_t(edram_info.msaa_samples) ||
++      key.msaa_samples >= xenos::MsaaSamples::k4X || key.Is64bpp() || !key.GetPitchTiles()) {
++    return reject(kFusedRejectRenderTarget);
++  }
++  DumpPipelineKey pipeline_key;
++  pipeline_key.msaa_samples = key.msaa_samples;
++  pipeline_key.resource_format = key.resource_format;
++  pipeline_key.is_depth = key.is_depth;
++  bool unsupported = false;
++  VkPipeline pipeline = GetFusedResolvePipeline(pipeline_key, unsupported);
++  if (pipeline == VK_NULL_HANDLE) {
++    return reject(unsupported ? kFusedRejectFormat : kFusedRejectPipeline);
++  }
++  plan_out.render_target = render_target;
++  plan_out.pipeline = pipeline;
++  plan_out.source_base_tiles = key.base_tiles;
++  plan_out.source_pitch_tiles = key.GetPitchTiles();
++  plan_out.span_first_tile = span_base;
++  ++fused_stats_.fused;
++  return true;
++}
++
++VkPipeline VulkanRenderTargetCache::GetFusedResolvePipeline(DumpPipelineKey key, bool& unsupported_out) {
++  unsupported_out = false;
++  auto entry_it = fused_resolve_pipelines_.find(key);
++  if (entry_it != fused_resolve_pipelines_.end()) {
++    unsupported_out = entry_it->second.unsupported;
++    return entry_it->second.pipeline;
++  }
++  FusedPipelineEntry entry;
++  // The variants the fused shader reproduces and the host test covered (tools/host_gpu_bench/fused_resolve/fused_resolve_bench.cpp): 8:8:8:8, 2:10:10:10 float, 32-bit float, depth with 24-bit float.
++  uint32_t kind = 0, depth_format = 0;
++  bool source_is_uint = false;
++  if (key.is_depth) {
++    if (key.GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8) {
++      depth_format = 1;
++    } else {
++      entry.unsupported = true;
++    }
++  } else {
++    switch (key.GetColorFormat()) {
++      case xenos::ColorRenderTargetFormat::k_8_8_8_8:
++        kind = 1;
++        break;
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
++        kind = 3;
++        break;
++      case xenos::ColorRenderTargetFormat::k_32_FLOAT:
++        kind = 4;
++        GetColorOwnershipTransferVulkanFormat(key.GetColorFormat(), key.msaa_samples, &source_is_uint);
++        break;
++      default:
++        entry.unsupported = true;
++        break;
++    }
++  }
++  if (!entry.unsupported) {
++    char defines[640];
++    std::snprintf(defines, sizeof defines,
++                  "#version 450\n#extension GL_EXT_samplerless_texture_functions : require\n#define SCALE_X %u\n#define SCALE_Y %u\n#define SRC_MSAA %u\n#define SRC_IS_DEPTH %u\n"
++                  "#define SRC_KIND %u\n#define SRC_UINT %u\n#define DEPTH_FORMAT %u\n#define DEPTH_ROUND %u\n#define HOST_2X_SAMPLE_0 %u\n#define HOST_2X_SAMPLE_1 %u\n",
++                  draw_resolution_scale_x(), draw_resolution_scale_y(), unsigned(key.msaa_samples), unsigned(key.is_depth), kind, unsigned(source_is_uint), depth_format,
++                  unsigned(depth_float24_round()),
++                  draw_util::GetD3D10SampleIndexForGuest2xMSAA(0, msaa_2x_attachments_supported_),
++                  draw_util::GetD3D10SampleIndexForGuest2xMSAA(1, msaa_2x_attachments_supported_));
++    std::string source = defines;
++    source += kRcompFusedResolveFast32Glsl;
++    std::vector<uint32_t> spirv;
++    std::string error;
++    if (!command_processor_.CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, source, spirv, error)) {
++      REXGPU_ERROR("VulkanRenderTargetCache: Failed to compile the fused resolve shader: {}", error);
++    } else {
++      entry.pipeline = ui::vulkan::util::CreateComputePipeline(
++          command_processor_.GetVulkanDevice(),
++          key.is_depth ? direct_resolve_pipeline_layout_depth_ : direct_resolve_pipeline_layout_color_, spirv.data(),
++          sizeof(uint32_t) * spirv.size());
++      if (entry.pipeline == VK_NULL_HANDLE) {
++        REXGPU_ERROR("VulkanRenderTargetCache: Failed to create the fused resolve pipeline");
++      } else {
++        std::fprintf(stderr, "RCOMP-FUSED-RESOLVE pipeline depth=%u format=%u msaa=%u kind=%u uint=%u words=%zu\n", unsigned(key.is_depth),
++                     unsigned(key.resource_format), unsigned(key.msaa_samples), kind, unsigned(source_is_uint), spirv.size());
++      }
++    }
++  }
++  fused_resolve_pipelines_.emplace(key, entry);
++  unsupported_out = entry.unsupported;
++  return entry.pipeline;
++}
++
++void VulkanRenderTargetCache::RecordFusedResolve(const FusedResolvePlan& plan, VkDescriptorSet descriptor_set_dest,
++                                                 const draw_util::ResolveCopyShaderConstants& copy_constants,
++                                                 uint32_t group_count_x, uint32_t group_count_y) {
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  VulkanRenderTarget& vulkan_rt = *plan.render_target;
++  const bool is_depth = vulkan_rt.key().is_depth;
++  const VkImageSubresourceRange subresource_range = ui::vulkan::util::InitializeSubresourceRange(
++      is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) : VK_IMAGE_ASPECT_COLOR_BIT);
++  // The render target is sampled by the compute shader, as the dump does.
++  command_processor_.PushImageMemoryBarrier(
++      vulkan_rt.image(), subresource_range, vulkan_rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++      vulkan_rt.current_access_mask(), VK_ACCESS_SHADER_READ_BIT, vulkan_rt.current_layout(),
++      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++  vulkan_rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++
++  command_processor_.BindExternalComputePipeline(plan.pipeline);
++  VkPipelineLayout pipeline_layout = is_depth ? direct_resolve_pipeline_layout_depth_ : direct_resolve_pipeline_layout_color_;
++  VkDescriptorSet descriptor_sets[2] = {descriptor_set_dest, vulkan_rt.GetDescriptorSetTransferSource()};
++  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 2, descriptor_sets, 0, nullptr);
++  DirectResolvePushConstants push_constants;
++  push_constants.resolve.dest_relative = copy_constants.dest_relative;
++  push_constants.resolve.dest_base = 0;
++  push_constants.source_base_tiles = plan.source_base_tiles;
++  push_constants.source_pitch_tiles = plan.source_pitch_tiles;
++  push_constants.dispatch_first_tile = plan.span_first_tile;
++  command_buffer.CmdVkPushConstants(pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants), &push_constants);
++  command_processor_.SubmitBarriers(true);
++  command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
++
++  if (early_rt_barrier_) {
++    // As after the dump: the render target goes back to its drawing layout at once.
++    VkPipelineStageFlags rt_dst_stage_mask;
++    VkAccessFlags rt_dst_access_mask;
++    VkImageLayout rt_new_layout;
++    VulkanRenderTarget::GetDrawUsage(is_depth, &rt_dst_stage_mask, &rt_dst_access_mask, &rt_new_layout);
++    command_processor_.PushImageMemoryBarrier(vulkan_rt.image(), subresource_range, vulkan_rt.current_stage_mask(), rt_dst_stage_mask,
++                                              vulkan_rt.current_access_mask(), rt_dst_access_mask, vulkan_rt.current_layout(), rt_new_layout);
++    vulkan_rt.SetUsage(rt_dst_stage_mask, rt_dst_access_mask, rt_new_layout);
++    command_processor_.SubmitBarriers(true);
++  }
++}
++
++bool VulkanRenderTargetCache::EnsureFusedVerifyResources() {
++  if (fused_verify_ready_) {
++    return true;
++  }
++  if (fused_verify_failed_) {
++    return false;
++  }
++  fused_verify_failed_ = true;
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  const VkDeviceSize scratch_size = VkDeviceSize(256) << 20;
++  const VkDeviceSize results_size = VkDeviceSize(kFusedVerifySlots) * 2 * sizeof(uint32_t);
++  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(vulkan_device, scratch_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
++                                                         ui::vulkan::util::MemoryPurpose::kDeviceLocal, fused_verify_scratch_,
++                                                         fused_verify_scratch_memory_)) {
++    REXGPU_ERROR("VulkanRenderTargetCache: Failed to create the fused resolve verification scratch buffer");
++    return false;
++  }
++  fused_verify_scratch_size_ = std::min<VkDeviceSize>(scratch_size, vulkan_device->properties().maxStorageBufferRange);
++  uint32_t results_memory_type = 0;
++  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(vulkan_device, results_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
++                                                         ui::vulkan::util::MemoryPurpose::kReadback, fused_verify_results_,
++                                                         fused_verify_results_memory_, &results_memory_type,
++                                                         &fused_verify_results_memory_size_)) {
++    REXGPU_ERROR("VulkanRenderTargetCache: Failed to create the fused resolve verification results buffer");
++    return false;
++  }
++  void* mapping = nullptr;
++  if (dfn.vkMapMemory(device, fused_verify_results_memory_, 0, VK_WHOLE_SIZE, 0, &mapping) != VK_SUCCESS) {
++    REXGPU_ERROR("VulkanRenderTargetCache: Failed to map the fused resolve verification results buffer");
++    return false;
++  }
++  fused_verify_results_mapped_ = static_cast<uint32_t*>(mapping);
++  std::memset(mapping, 0, size_t(results_size));
++  fused_verify_results_coherent_ = (vulkan_device->memory_types().host_coherent & (uint32_t(1) << results_memory_type)) != 0;
++  if (!fused_verify_results_coherent_) {
++    VkMappedMemoryRange range = {};
++    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++    range.memory = fused_verify_results_memory_;
++    range.offset = 0;
++    range.size = std::min(rex::round_up(results_size, vulkan_device->properties().nonCoherentAtomSize), fused_verify_results_memory_size_);
++    dfn.vkFlushMappedMemoryRanges(device, 1, &range);
++  }
++
++  // The results descriptor (set 2 of the compare pipeline).
++  VkDescriptorPoolSize pool_size;
++  pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++  pool_size.descriptorCount = 1;
++  VkDescriptorPoolCreateInfo pool_create_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
++  pool_create_info.maxSets = 1;
++  pool_create_info.poolSizeCount = 1;
++  pool_create_info.pPoolSizes = &pool_size;
++  if (dfn.vkCreateDescriptorPool(device, &pool_create_info, nullptr, &fused_verify_pool_) != VK_SUCCESS) {
++    return false;
++  }
++  VkDescriptorSetAllocateInfo set_allocate_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
++  set_allocate_info.descriptorPool = fused_verify_pool_;
++  set_allocate_info.descriptorSetCount = 1;
++  set_allocate_info.pSetLayouts = &descriptor_set_layout_storage_buffer_;
++  if (dfn.vkAllocateDescriptorSets(device, &set_allocate_info, &fused_verify_results_set_) != VK_SUCCESS) {
++    return false;
++  }
++  VkDescriptorBufferInfo results_buffer_info = {fused_verify_results_, 0, VK_WHOLE_SIZE};
++  VkWriteDescriptorSet results_write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
++  results_write.dstSet = fused_verify_results_set_;
++  results_write.descriptorCount = 1;
++  results_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++  results_write.pBufferInfo = &results_buffer_info;
++  dfn.vkUpdateDescriptorSets(device, 1, &results_write, 0, nullptr);
++
++  // Pipeline layout: set 0 the real destination and set 1 the scratch (transient single-buffer sets), set 2 the results.
++  VkDescriptorSetLayout set_layouts[3] = {
++      command_processor_.GetSingleTransientDescriptorLayout(VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageBufferCompute),
++      command_processor_.GetSingleTransientDescriptorLayout(VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageBufferCompute),
++      descriptor_set_layout_storage_buffer_};
++  VkPushConstantRange push_range = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 3 * sizeof(uint32_t)};
++  VkPipelineLayoutCreateInfo layout_create_info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
++  layout_create_info.setLayoutCount = 3;
++  layout_create_info.pSetLayouts = set_layouts;
++  layout_create_info.pushConstantRangeCount = 1;
++  layout_create_info.pPushConstantRanges = &push_range;
++  if (dfn.vkCreatePipelineLayout(device, &layout_create_info, nullptr, &fused_verify_pipeline_layout_) != VK_SUCCESS) {
++    return false;
++  }
++  std::vector<uint32_t> spirv;
++  std::string error;
++  for (int which = 0; which < 2; ++which) {
++    std::string source = which ? kRcompFusedVerifyCompareGlsl : kRcompFusedVerifySnapshotGlsl;
++    spirv.clear();
++    if (!command_processor_.CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, source, spirv, error)) {
++      REXGPU_ERROR("VulkanRenderTargetCache: Failed to compile a fused resolve verification shader: {}", error);
++      return false;
++    }
++    VkPipeline pipeline = ui::vulkan::util::CreateComputePipeline(vulkan_device, fused_verify_pipeline_layout_, spirv.data(), sizeof(uint32_t) * spirv.size());
++    if (pipeline == VK_NULL_HANDLE) {
++      return false;
++    }
++    (which ? fused_verify_compare_pipeline_ : fused_verify_snapshot_pipeline_) = pipeline;
++  }
++  fused_verify_slot_info_.assign(kFusedVerifyInfoRing, FusedVerifySlotInfo());
++  fused_verify_ready_ = true;
++  fused_verify_failed_ = false;
++  std::fprintf(stderr, "RCOMP-FUSED-VERIFY ready scratch=%llu MB results=%u slots coherent=%u\n", (unsigned long long)(scratch_size >> 20), kFusedVerifySlots,
++               unsigned(fused_verify_results_coherent_));
++  return true;
++}
++
++bool VulkanRenderTargetCache::RecordFusedVerifyBegin(VulkanTextureCache& texture_cache, VkDescriptorSet descriptor_set_dest, uint64_t use_start,
++                                                     uint64_t use_length, uint64_t use_offset_in_binding, VkDescriptorSet& scratch_set_out,
++                                                     uint32_t& slot_out) {
++  if (!EnsureFusedVerifyResources() || !use_length) {
++    return false;
++  }
++  const uint64_t words = (use_length + 3) >> 2;
++  if (use_offset_in_binding + use_length > fused_verify_scratch_size_ || (use_offset_in_binding & 3) || fused_verify_next_slot_ >= kFusedVerifySlots) {
++    ++fused_stats_.verify_skipped;
++    return false;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  // The scratch buffer as a second transient destination descriptor.
++  scratch_set_out = command_processor_.AllocateSingleTransientDescriptor(VulkanCommandProcessor::SingleTransientDescriptorLayout::kStorageBufferCompute);
++  if (scratch_set_out == VK_NULL_HANDLE) {
++    ++fused_stats_.verify_skipped;
++    return false;
++  }
++  VkDescriptorBufferInfo scratch_info;
++  scratch_info.buffer = fused_verify_scratch_;
++  scratch_info.offset = 0;
++  scratch_info.range = std::min<VkDeviceSize>(fused_verify_scratch_size_, vulkan_device->properties().maxStorageBufferRange);
++  VkWriteDescriptorSet scratch_write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
++  scratch_write.dstSet = scratch_set_out;
++  scratch_write.descriptorCount = 1;
++  scratch_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++  scratch_write.pBufferInfo = &scratch_info;
++  dfn.vkUpdateDescriptorSets(device, 1, &scratch_write, 0, nullptr);
++
++  slot_out = fused_verify_next_slot_++;
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  // The scratch buffer is only ever used by these compute passes: one conservative barrier before each of them.
++  const VkPipelineStageFlags compute_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++  const VkAccessFlags compute_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++  command_processor_.PushBufferMemoryBarrier(fused_verify_scratch_, 0, VK_WHOLE_SIZE, compute_stage, compute_stage, compute_access, compute_access);
++  command_processor_.BindExternalComputePipeline(fused_verify_snapshot_pipeline_);
++  VkDescriptorSet sets[3] = {descriptor_set_dest, scratch_set_out, fused_verify_results_set_};
++  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, fused_verify_pipeline_layout_, 0, 3, sets, 0, nullptr);
++  const uint32_t push[3] = {uint32_t(words), uint32_t(use_offset_in_binding >> 2), slot_out};
++  command_buffer.CmdVkPushConstants(fused_verify_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
++  command_processor_.SubmitBarriers(true);
++  const uint32_t groups = uint32_t((words + 255) >> 8);
++  command_buffer.CmdVkDispatch(std::min<uint32_t>(groups, 4096), (groups + 4095) / 4096, 1);
++  // The resolve writes the destination next: the snapshot's reads must be over (write after read), which this call orders.
++  texture_cache.UseScaledResolveBufferForWrite(use_start, use_length);
++  return true;
++}
++
++void VulkanRenderTargetCache::RecordFusedVerifyEnd(VulkanTextureCache& texture_cache, const FusedResolvePlan& plan, VkDescriptorSet descriptor_set_dest,
++                                                   VkDescriptorSet scratch_set, const draw_util::ResolveCopyShaderConstants& copy_constants,
++                                                   uint32_t group_count_x, uint32_t group_count_y, uint64_t use_start, uint64_t use_length,
++                                                   uint64_t use_offset_in_binding, uint32_t slot) {
++  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  const uint64_t words = (use_length + 3) >> 2;
++  const VkPipelineStageFlags compute_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++  const VkAccessFlags compute_access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++  // The fused pass writes the scratch copy of the destination (after the snapshot of it).
++  command_processor_.PushBufferMemoryBarrier(fused_verify_scratch_, 0, VK_WHOLE_SIZE, compute_stage, compute_stage, compute_access, compute_access);
++  RecordFusedResolve(plan, scratch_set, copy_constants, group_count_x, group_count_y);
++  // The original path's writes of the real destination and the fused pass's writes of the scratch buffer must be done before the comparison reads both.
++  texture_cache.UseScaledResolveBufferForWrite(use_start, use_length);
++  command_processor_.PushBufferMemoryBarrier(fused_verify_scratch_, 0, VK_WHOLE_SIZE, compute_stage, compute_stage, compute_access, compute_access);
++  command_processor_.BindExternalComputePipeline(fused_verify_compare_pipeline_);
++  VkDescriptorSet sets[3] = {descriptor_set_dest, scratch_set, fused_verify_results_set_};
++  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, fused_verify_pipeline_layout_, 0, 3, sets, 0, nullptr);
++  const uint32_t push[3] = {uint32_t(words), uint32_t(use_offset_in_binding >> 2), slot};
++  command_buffer.CmdVkPushConstants(fused_verify_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
++  command_processor_.SubmitBarriers(true);
++  const uint32_t groups = uint32_t((words + 255) >> 8);
++  command_buffer.CmdVkDispatch(std::min<uint32_t>(groups, 4096), (groups + 4095) / 4096, 1);
++  ++fused_stats_.verify_resolves;
++  fused_stats_.verify_words += words;
++  FusedVerifySlotInfo& info = fused_verify_slot_info_[slot % kFusedVerifyInfoRing];
++  info.frame = uint32_t(command_processor_.GetCurrentFrame());
++  info.render_target_key = plan.render_target->key().key;
++  info.constants[0] = copy_constants.dest_relative.edram_info.packed;
++  info.constants[1] = copy_constants.dest_relative.coordinate_info.packed;
++  info.constants[2] = copy_constants.dest_relative.dest_info.value;
++  info.constants[3] = copy_constants.dest_relative.dest_coordinate_info.packed;
++  info.span_first_tile = plan.span_first_tile;
++  info.words = uint32_t(words);
++  // The results of the resolves that are surely complete (the last 2,048 are not read yet).
++  if ((slot & 1023) == 1023 && slot > 3072) {
++    ScanFusedVerifyResults(slot - 2048);
++  }
++}
++
++void VulkanRenderTargetCache::ScanFusedVerifyResults(uint32_t limit_slot) {
++  if (!fused_verify_results_mapped_) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  if (!fused_verify_results_coherent_) {
++    VkMappedMemoryRange range = {};
++    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++    range.memory = fused_verify_results_memory_;
++    range.offset = 0;
++    range.size = std::min(rex::round_up(VkDeviceSize(kFusedVerifySlots) * 2 * sizeof(uint32_t), vulkan_device->properties().nonCoherentAtomSize),
++                          fused_verify_results_memory_size_);
++    vulkan_device->functions().vkInvalidateMappedMemoryRanges(vulkan_device->device(), 1, &range);
++  }
++  uint32_t mismatched_in_scan = 0;
++  for (; fused_verify_scan_next_ < limit_slot && fused_verify_scan_next_ < fused_verify_next_slot_; ++fused_verify_scan_next_) {
++    const uint32_t slot = fused_verify_scan_next_;
++    const uint32_t differing = fused_verify_results_mapped_[2 * slot];
++    if (!differing) {
++      continue;
++    }
++    ++fused_stats_.verify_mismatched;
++    ++mismatched_in_scan;
++    if (fused_stats_.verify_mismatched <= 32) {
++      const FusedVerifySlotInfo& info = fused_verify_slot_info_[slot % kFusedVerifyInfoRing];
++      std::fprintf(stderr,
++                   "RCOMP-FUSED-VERIFY MISMATCH slot=%u frame=%u words=%u differing=%u first_word=%u rt=%08X span_first_tile=%u constants=%08X,%08X,%08X,%08X\n", slot,
++                   info.frame, info.words, differing, ~fused_verify_results_mapped_[2 * slot + 1], info.render_target_key, info.span_first_tile, info.constants[0],
++                   info.constants[1], info.constants[2], info.constants[3]);
++    }
++  }
++  std::fprintf(stderr, "RCOMP-FUSED-VERIFY scanned=%u verified=%llu mismatched=%llu words=%llu\n", fused_verify_scan_next_,
++               (unsigned long long)fused_stats_.verify_resolves, (unsigned long long)fused_stats_.verify_mismatched,
++               (unsigned long long)fused_stats_.verify_words);
++}
++
+ }  // namespace rex::graphics::vulkan

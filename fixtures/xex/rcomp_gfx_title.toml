@@ -1,0 +1,5 @@
+# XenonRecomp configuration for the synthetic graphics XEX (XEX/TOML mode).
+# Paths are relative to this file's directory in the build (build/xex-gfx/).
+[main]
+file_path = "rcomp_gfx_title.xex"
+out_directory_path = "ppc"

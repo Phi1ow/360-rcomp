@@ -1,0 +1,48 @@
+--- a/XenonAnalyse/main.cpp
++++ b/XenonAnalyse/main.cpp
+@@ -101,11 +101,15 @@
+     }
+ }
+ 
+-void ScanTable(const uint32_t* code, size_t base, SwitchTable& table)
++// Compilers may hoist the bounds check far above the table load. `window` is
++// how many instructions to search backwards; `indexReg` (when not -1) is the
++// register the table is indexed with and must be the register the guarding
++// cmplwi tests, so an unrelated compare is never taken for the bound.
++void ScanTable(const uint32_t* code, size_t base, SwitchTable& table, int window = 32, uint32_t indexReg = (uint32_t)-1)
+ {
+     ppc_insn insn;
+     uint32_t cr{ (uint32_t)-1 };
+-    for (int i = 0; i < 32; i++)
++    for (int i = 0; i < window; i++)
+     {
+         ppc::Disassemble(&code[-i], base - (4 * i), insn);
+         if (insn.opcode == nullptr)
+@@ -125,6 +129,11 @@
+         {
+             if (insn.opcode->id == PPC_INST_CMPLWI && insn.operands[0] == cr)
+             {
++                if (indexReg != (uint32_t)-1 && insn.operands[1] != indexReg)
++                {
++                    table.defaultLabel = 0;
++                    break;
++                }
+                 table.r = insn.operands[1];
+                 table.labels.resize(insn.operands[2] + 1);
+                 table.base = base;
+@@ -234,6 +243,15 @@
+                         SwitchTable table{};
+                         table.type = type;
+                         ScanTable((uint32_t*)data, base + (data - dataStart), table);
++                        if (table.base == 0 && type == SWITCH_ABSOLUTE)
++                        {
++                            // Hoisted guard: the index register is the source of the rlwinm at +2.
++                            ppc_insn rl;
++                            ppc::Disassemble((const uint32_t*)data + 2, base + (data - dataStart) + 8, rl);
++                            table = SwitchTable{};
++                            table.type = type;
++                            ScanTable((uint32_t*)data, base + (data - dataStart), table, 1024, rl.operands[1]);
++                        }
+ 
+                         // fmt::println("{:X} ; jmptable - {}", base + (data - dataStart), table.labels.size());
+                         if (table.base != 0)

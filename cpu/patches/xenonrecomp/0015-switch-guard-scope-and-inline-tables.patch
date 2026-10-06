@@ -1,0 +1,88 @@
+--- a/XenonAnalyse/main.cpp
++++ b/XenonAnalyse/main.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <cassert>
+ #include <iterator>
+ #include <file.h>
+@@ -105,6 +106,24 @@
+ // how many instructions to search backwards; `indexReg` (when not -1) is the
+ // register the table is indexed with and must be the register the guarding
+ // cmplwi tests, so an unrelated compare is never taken for the bound.
++// Instructions whose first operand is a GPR they write. A hoisted guard is only
++// valid while the index register keeps the value it compared.
++static bool WritesFirstGpr(uint32_t id)
++{
++    switch (id)
++    {
++    case PPC_INST_LI: case PPC_INST_LIS: case PPC_INST_ADDI: case PPC_INST_ADDIS: case PPC_INST_ADD:
++    case PPC_INST_SUBF: case PPC_INST_MR: case PPC_INST_LWZ: case PPC_INST_LWZX: case PPC_INST_LWZU:
++    case PPC_INST_LBZ: case PPC_INST_LBZX: case PPC_INST_LHZ: case PPC_INST_LHZX: case PPC_INST_RLWINM:
++    case PPC_INST_CLRLWI: case PPC_INST_ORI: case PPC_INST_OR: case PPC_INST_AND: case PPC_INST_ANDI:
++    case PPC_INST_EXTSW: case PPC_INST_EXTSB: case PPC_INST_EXTSH: case PPC_INST_NEG: case PPC_INST_SRAWI:
++    case PPC_INST_MULLI:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ void ScanTable(const uint32_t* code, size_t base, SwitchTable& table, int window = 32, uint32_t indexReg = (uint32_t)-1)
+ {
+     ppc_insn insn;
+@@ -115,6 +134,16 @@
+         if (insn.opcode == nullptr)
+         {
+             continue;
++        }
++
++        // Hoisted search: a return ends the enclosing function and a write to the
++        // index register ends the range the guard could describe.
++        if (indexReg != (uint32_t)-1 && i > 0 &&
++            (insn.opcode->id == PPC_INST_BLR ||
++             (WritesFirstGpr(insn.opcode->id) && insn.operands[0] == indexReg)))
++        {
++            table.defaultLabel = 0;
++            break;
+         }
+ 
+         if (cr == -1 && (insn.opcode->id == PPC_INST_BGT || insn.opcode->id == PPC_INST_BGTLR || insn.opcode->id == PPC_INST_BLE || insn.opcode->id == PPC_INST_BLELR))
+@@ -251,6 +280,38 @@
+                             table = SwitchTable{};
+                             table.type = type;
+                             ScanTable((uint32_t*)data, base + (data - dataStart), table, 1024, rl.operands[1]);
++                            if (table.base == 0)
++                            {
++                                // No guard: the index is bounded by construction (for example set by
++                                // li constants). A table emitted right after the bctr ends where the
++                                // first case begins, so its length is the first n whose smallest entry
++                                // is the address just past n entries; an entry can never point inside
++                                // the table, which makes that n unique.
++                                ppc_insn hi, lo;
++                                const size_t at = base + (data - dataStart);
++                                ppc::Disassemble((const uint32_t*)data, at, hi);
++                                ppc::Disassemble((const uint32_t*)data + 1, at + 4, lo);
++                                const uint32_t tableAddress = (uint32_t(hi.operands[1]) << 16) + int32_t(int16_t(lo.operands[2]));
++                                const auto* words = (const be<uint32_t>*)image.Find(tableAddress);
++                                if (words && tableAddress == at + 6 * 4)
++                                {
++                                    uint32_t lowest = UINT32_MAX;
++                                    for (uint32_t n = 1; n <= 512; n++)
++                                    {
++                                        const uint32_t entry = words[n - 1];
++                                        if (entry & 3 || entry < tableAddress || entry - tableAddress > 0x100000)
++                                            break;
++                                        lowest = std::min(lowest, entry);
++                                        if (lowest == tableAddress + 4 * n)
++                                        {
++                                            table.r = rl.operands[1];
++                                            table.labels.resize(n);
++                                            table.base = at;
++                                            break;
++                                        }
++                                    }
++                                }
++                            }
+                         }
+ 
+                         // fmt::println("{:X} ; jmptable - {}", base + (data - dataStart), table.labels.size());

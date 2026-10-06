@@ -1,0 +1,92 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -5739,6 +5739,38 @@
+                      (unsigned long long)rcomp_readbacks, read_index, unsigned(is_cache_miss), nonzero_words,
+                      written_length >> 2, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+         const uint32_t log_format = uint32_t(rcomp_log_dest_info.copy_dest_format);
++        if (log_format == uint32_t(xenos::ColorFormat::k_2_10_10_10) ||
++            log_format == uint32_t(xenos::ColorFormat::k_8_8_8_8)) {
++          // 32-bit destinations as the guest CPU loads them (big-endian words): the mean of each component (10:10:10:2 from the low bits, or the four bytes
++          // from the most significant one) and, for 10:10:10:2, how many pixels hold each of the four alpha values. Compare the same resolve between the host render
++          // target path and the fragment shader interlock path to find the target that differs.
++          const bool is_2_10_10_10 = log_format == uint32_t(xenos::ColorFormat::k_2_10_10_10);
++          double sums[4] = {};
++          uint64_t alpha_counts[4] = {};
++          const uint32_t pixels = written_length >> 2;
++          for (uint32_t i = 0; i < pixels; ++i) {
++            const uint8_t* p = destination + i * 4;
++            const uint32_t big = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
++            if (is_2_10_10_10) {
++              for (uint32_t c = 0; c < 3; ++c) {
++                sums[c] += double((big >> (10 * c)) & 1023) * (1.0 / 1023.0);
++              }
++              sums[3] += double(big >> 30) * (1.0 / 3.0);
++              ++alpha_counts[big >> 30];
++            } else {
++              for (uint32_t c = 0; c < 4; ++c) {
++                sums[c] += double(p[c]) * (1.0 / 255.0);
++              }
++            }
++          }
++          const double inverse = pixels ? 1.0 / double(pixels) : 0.0;
++          std::fprintf(stderr,
++                       "RCOMP-READBACK-UNORM n=%llu fmt=%u means=%.4f %.4f %.4f %.4f alpha_counts=%llu %llu %llu %llu (2_10_10_10: r g b a from the low bits; 8_8_8_8: bytes 0..3)\n",
++                       (unsigned long long)rcomp_readbacks, log_format, sums[0] * inverse, sums[1] * inverse,
++                       sums[2] * inverse, sums[3] * inverse, (unsigned long long)alpha_counts[0],
++                       (unsigned long long)alpha_counts[1], (unsigned long long)alpha_counts[2],
++                       (unsigned long long)alpha_counts[3]);
++        }
+         if (log_format == uint32_t(xenos::ColorFormat::k_16_FLOAT) ||
+             log_format == uint32_t(xenos::ColorFormat::k_16_16_FLOAT) ||
+             log_format == uint32_t(xenos::ColorFormat::k_16_16_16_16_FLOAT)) {
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -47,6 +47,18 @@
+ // R-comp: after dumping the render targets for a resolve, return them to their drawing layout at once
+ // (before the resolve copy is recorded) instead of when the next draw needs them, so the barrier does
+ // not wait for the copy and the draws of the next pass can overlap it.
++// R-comp: the host render target path stores the guest's k_2_10_10_10 and k_2_10_10_10_AS_10_10_10_10 render targets as A8B8G8R8_UNORM (as in the SDK and Xenia): 8 bits of
++// color instead of the EDRAM's 10 and 8 bits of alpha instead of 2, so every blend and every store into them rounds to a different grid than the console (the fragment shader
++// interlock path, which stores 10:10:10:2, does not). With this on, they are hosted as A2B10G10R10_UNORM_PACK32 (color attachment, blending and sampling are required for it by
++// Vulkan): the stored values are those of the EDRAM. Dumps, resolves, clears and ownership transfers convert through float values and need no change.
++REXCVAR_DEFINE_BOOL(rcomp_rt_2_10_10_10_exact, false, "GPU/Vulkan",
++                    "Host render target path: store k_2_10_10_10 render targets as A2B10G10R10_UNORM (10-bit color, 2-bit alpha) instead of A8B8G8R8_UNORM")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++namespace {
++// Decided once by VulkanRenderTargetCache::Initialize (rcomp_rt_2_10_10_10_exact and the format's support), before any render target, render pass or pipeline exists.
++bool rcomp_rt_2_10_10_10_exact_host = false;
++}  // namespace
++
+ REXCVAR_DEFINE_BOOL(rcomp_early_rt_barrier, true, "GPU/Vulkan",
+                     "Transition dumped render targets back to the drawing layout before the resolve copy")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -1305,6 +1317,19 @@
+                                         kUsedColorFormatFeatures) == kUsedColorFormatFeatures;
+   bool color_rgba16_unorm_supported = (color_rgba16_unorm_properties.optimalTilingFeatures &
+                                        kUsedColorFormatFeatures) == kUsedColorFormatFeatures;
++  // R-comp: rcomp_rt_2_10_10_10_exact.
++  rcomp_rt_2_10_10_10_exact_host = false;
++  if (REXCVAR_GET(rcomp_rt_2_10_10_10_exact)) {
++    VkFormatProperties color_a2b10g10r10_properties;
++    ifn.vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_A2B10G10R10_UNORM_PACK32,
++                                            &color_a2b10g10r10_properties);
++    constexpr VkFormatFeatureFlags kA2B10G10R10Features =
++        kUsedColorFormatFeatures | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
++    rcomp_rt_2_10_10_10_exact_host =
++        (color_a2b10g10r10_properties.optimalTilingFeatures & kA2B10G10R10Features) == kA2B10G10R10Features;
++    std::fprintf(stderr, "RCOMP-RT-2-10-10-10 requested=1 host=%s\n",
++                 rcomp_rt_2_10_10_10_exact_host ? "A2B10G10R10_UNORM" : "A8B8G8R8_UNORM (A2B10G10R10 unsupported)");
++  }
+   bool color_rg16_draw_format_supported = true;
+   if (!color_rg16_snorm_supported) {
+     if (color_rg16_sfloat_supported) {
+@@ -2950,7 +2975,8 @@
+                                              : VK_FORMAT_R8G8B8A8_UNORM;
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+-      return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
++      return rcomp_rt_2_10_10_10_exact_host ? VK_FORMAT_A2B10G10R10_UNORM_PACK32
++                                            : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+       return VK_FORMAT_R16G16B16A16_SFLOAT;

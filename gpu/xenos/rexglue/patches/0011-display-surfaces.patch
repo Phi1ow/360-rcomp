@@ -1,0 +1,46 @@
+diff -ruN a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+--- a/include/rex/ui/vulkan/instance.h	2026-09-26 12:32:00.365225352 +0000
++++ b/include/rex/ui/vulkan/instance.h	2026-09-26 12:26:40.133244482 +0000
+@@ -102,6 +102,10 @@
+   // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_surface = false;  // #1
++#if defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0011
++    bool ext_KHR_display = false;          // #3
++    bool ext_EXT_headless_surface = false; // #257
++#endif
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+     bool ext_KHR_xcb_surface = false;  // #6
+ #endif
+diff -ruN a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+--- a/src/ui/vulkan/vulkan_instance.cpp	2026-09-26 12:32:00.365401713 +0000
++++ b/src/ui/vulkan/vulkan_instance.cpp	2026-09-26 12:26:40.132972655 +0000
+@@ -180,6 +180,13 @@
+     requested_extensions.emplace("VK_EXT_metal_surface",
+                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
+ #endif
++#if defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)
++    // R-comp patch 0011: surfaces without a window system: a display plane
++    // (PS5_Vulkan) or a headless surface (host tests).
++    requested_extensions.emplace("VK_KHR_display", &vulkan_instance->extensions_.ext_KHR_display);
++    requested_extensions.emplace("VK_EXT_headless_surface",
++                                 &vulkan_instance->extensions_.ext_EXT_headless_surface);
++#endif
+   }
+ 
+   std::vector<const char*> enabled_extensions;
+@@ -478,8 +485,14 @@
+ 
+   // Check whether a surface can be created.
+ 
++#if defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0011
++  if (with_surface && !(vulkan_instance->extensions_.ext_KHR_surface &&
++                        (vulkan_instance->extensions_.ext_KHR_display ||
++                         vulkan_instance->extensions_.ext_EXT_headless_surface))) {
++#else
+   if (with_surface &&
+       !VulkanPresenter::GetSurfaceTypesSupportedByInstance(vulkan_instance->extensions_)) {
++#endif
+     REXLOG_ERROR("The Vulkan instance doesn't support surface types used by Xenia");
+     return nullptr;
+   }

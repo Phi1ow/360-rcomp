@@ -1,0 +1,326 @@
+diff -ruN d/XenonRecomp/recompiler.cpp e/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 15:26:14.945462039 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 16:21:15.802139247 +0000
+@@ -1995,51 +1995,13 @@
+     }
+ 
+     case PPC_INST_VPKD3D128:
+-        // TODO: vectorize somehow?
+-        // NOTE: handling vector reversal here too
++        // R-comp patch 0004: every format through ppc_vpkd3d128 (ppc_context.h).
+         printSetFlushMode(true);
+-        switch (insn.operands[2])
+-        {
+-        case 0: // D3D color
+-            if (insn.operands[3] != 1)
+-                fmt::println("Unexpected D3D color pack instruction at {:X}", base);
+-
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-                constexpr size_t indices[] = { 3, 0, 1, 2 };
+-                println("\t{}.u32[{}] = 0x404000FF;", vTemp(), i);
+-                println("\t{}.f32[{}] = {}.f32[{}] < 3.0f ? 3.0f : ({}.f32[{}] > {}.f32[{}] ? {}.f32[{}] : {}.f32[{}]);", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[1]), i, vTemp(), i, vTemp(), i, v(insn.operands[1]), i);
+-                println("\t{}.u32 {}= uint32_t({}.u8[{}]) << {};", temp(), i == 0 ? "" : "|", vTemp(), i * 4, indices[i] * 8);
+-            }
+-            println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
+-            break;
+-
+-        case 5: // float16_4
+-            if (insn.operands[3] != 2 || insn.operands[4] > 2)
+-                fmt::println("Unexpected float16_4 pack instruction at {:X}", base);
+-
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-        		// Strip sign from source
+-        		println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", temp(), v(insn.operands[1]), i);
+-        		// If |source| is > 65504, clamp output to 0x7FFF, else save 8 exponent bits 
+-        		println("\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : (({2}.u32[{3}]&0x7f800000)>>23);", vTemp(), temp(), v(insn.operands[1]), i);
+-        		// If 8 exponent bits were saved, it can only be 0x8E at most
+-        		// If saved, save first 10 bits of mantissa
+-        		println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", temp(), vTemp(), v(insn.operands[1]), i);
+-        		// If saved and > 127-15, exponent is converted from 8 to 5-bit by subtracting 0x70
+-        		// If saved but not > 127-15, clamp exponent at 0, add 0x400 to mantissa and shift right by (0x71-exponent)
+-        		// If right shift is greater than 31 bits, manually clamp mantissa to 0 or else the output of the shift will be wrong
+-        		println("\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? ((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : ((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;", v(insn.operands[0]), i+(2*insn.operands[4]), vTemp(), temp());
+-        		// Add back original sign
+-        		println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", v(insn.operands[0]), i+(2*insn.operands[4]), v(insn.operands[1]), i);
+-            }
+-            break;
+-
+-        default:
++        if (insn.operands[2] > 6 || insn.operands[3] < 1 || insn.operands[3] > 3 || insn.operands[4] > 3)
+             println("\t__builtin_debugtrap();");
+-            break;
+-        }
++        else
++            println("\tppc_vpkd3d128({}, {}, {}, {}, {});", v(insn.operands[0]), v(insn.operands[1]),
++                insn.operands[2], insn.operands[3], insn.operands[4]);
+         break;
+ 
+     case PPC_INST_VPKSHUS:
+@@ -2187,35 +2149,11 @@
+         break;
+ 
+     case PPC_INST_VUPKD3D128:
+-        // TODO: vectorize somehow?
+-        // NOTE: handling vector reversal here too
+-        switch (insn.operands[2] >> 2)
+-        {
+-        case 0: // D3D color
+-            for (size_t i = 0; i < 4; i++)
+-            {
+-                constexpr size_t indices[] = { 3, 0, 1, 2 };
+-                println("\t{}.u32[{}] = {}.u8[{}] | 0x3F800000;", vTemp(), i, v(insn.operands[1]), indices[i]);
+-            }
+-            println("\t{} = {};", v(insn.operands[0]), vTemp());
+-            break;
+-
+-        case 1: // 2 shorts
+-            for (size_t i = 0; i < 2; i++)
+-            {
+-                println("\t{}.f32 = 3.0f;", temp());
+-                println("\t{}.s32 += {}.s16[{}];", temp(), v(insn.operands[1]), 1 - i);
+-                println("\t{}.f32[{}] = {}.f32;", vTemp(), 3 - i, temp());
+-            }
+-            println("\t{}.f32[1] = 0.0f;", vTemp());
+-            println("\t{}.f32[0] = 1.0f;", vTemp());
+-            println("\t{} = {};", v(insn.operands[0]), vTemp());
+-            break;
+-
+-        default:
++        // R-comp patch 0004: every format through ppc_vupkd3d128 (ppc_context.h).
++        if ((insn.operands[2] >> 2) > 6)
+             println("\t__builtin_debugtrap();");
+-            break;
+-        }
++        else
++            println("\tppc_vupkd3d128({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), insn.operands[2] >> 2);
+         break;
+ 
+     case PPC_INST_VUPKHSB:
+diff -ruN d/XenonUtils/ppc_context.h e/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-09-25 15:21:23.004325099 +0000
++++ b/XenonUtils/ppc_context.h	2026-09-25 16:21:15.801635254 +0000
+@@ -694,6 +694,222 @@
+     return simde_mm_castps_si128(simde_mm_insert_ps(simde_mm_castsi128_ps(simde_mm_srl_epi64(a, b)), simde_mm_castsi128_ps(simde_mm_srl_epi64(simde_mm_srli_si128(a, 4), b)), 0x10));
+ }
+ 
++// ---- R-comp patch 0004: vpkd3d128 / vupkd3d128 --------------------------
++// Emulation of the D3D pack/unpack instructions in guest word order
++// (G[i] = guest word i = host u32[3 - i]). Each format follows the reference
++// sequences of Xenia's x64 backend (x64_seq_vector.cc PACK/UNPACK, BSD-3):
++// maxps/minps saturation (NaN -> the second operand), byte shuffles with the
++// same masks, float16 conversion as vcvtps2ph with round-toward-zero and
++// vcvtph2ps, then for packs the insertion permute of ppc_emit_altivec.cc.
++inline float ppc_bits_to_f32(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
++inline uint32_t ppc_f32_to_bits(float f) { uint32_t v; memcpy(&v, &f, 4); return v; }
++inline uint32_t ppc_maxps(uint32_t a, uint32_t b) { return ppc_bits_to_f32(a) > ppc_bits_to_f32(b) ? a : b; }
++inline uint32_t ppc_minps(uint32_t a, uint32_t b) { return ppc_bits_to_f32(a) < ppc_bits_to_f32(b) ? a : b; }
++
++inline void ppc_pshufb(const uint32_t in[4], const uint32_t mask[4], uint32_t out[4])
++{
++    for (int l = 0; l < 4; l++)
++    {
++        uint32_t r = 0;
++        for (int k = 0; k < 4; k++)
++        {
++            uint32_t m = (mask[l] >> (8 * k)) & 0xFF;
++            uint32_t b = (m & 0x80) ? 0 : (in[(m & 15) >> 2] >> (8 * (m & 3))) & 0xFF;
++            r |= b << (8 * k);
++        }
++        out[l] = r;
++    }
++}
++
++// vcvtps2ph, rounding control = toward zero.
++inline uint16_t ppc_f32_to_f16_rz(uint32_t b)
++{
++    uint32_t sign = (b >> 16) & 0x8000, exp = (b >> 23) & 0xFF, man = b & 0x7FFFFF;
++    if (exp == 0xFF)
++        return uint16_t(man ? (sign | 0x7E00 | (man >> 13)) : (sign | 0x7C00));
++    int e = int(exp) - 127 + 15;
++    if (e >= 0x1F)
++        return uint16_t(sign | 0x7BFF);
++    if (e <= 0)
++    {
++        if (exp == 0 || e < -10)
++            return uint16_t(sign);
++        return uint16_t(sign | ((man | 0x800000) >> (14 - e)));
++    }
++    return uint16_t(sign | (uint32_t(e) << 10) | (man >> 13));
++}
++
++// vcvtph2ps (exact; signalling NaNs are quieted).
++inline uint32_t ppc_f16_to_f32(uint16_t h)
++{
++    uint32_t sign = uint32_t(h & 0x8000) << 16, exp = (h >> 10) & 0x1F, man = h & 0x3FF;
++    if (exp == 0)
++    {
++        if (man == 0)
++            return sign;
++        int e = 127 - 15 + 1;
++        while (!(man & 0x400)) { man <<= 1; e--; }
++        return sign | (uint32_t(e) << 23) | ((man & 0x3FF) << 13);
++    }
++    if (exp == 0x1F)
++        return sign | 0x7F800000 | (man << 13) | (man ? 0x400000 : 0);
++    return sign | ((exp + 112) << 23) | (man << 13);
++}
++
++// Returns false for a (type, pack, shift) the reference does not define.
++inline bool ppc_vpkd3d128(PPCVRegister& vd, const PPCVRegister& vb, uint32_t type, uint32_t pack, uint32_t shift)
++{
++    uint32_t g[4], t[4], d[4] = {};
++    for (int i = 0; i < 4; i++) g[i] = vb.u32[3 - i];
++    switch (type)
++    {
++    case 0: // D3DCOLOR
++    {
++        static const uint32_t m[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0C000408u };
++        for (int i = 0; i < 4; i++) t[i] = ppc_minps(ppc_maxps(g[i], 0x40400000u), 0x404000FFu);
++        ppc_pshufb(t, m, d);
++        break;
++    }
++    case 1: // NORMSHORT2
++    case 4: // NORMSHORT4
++    {
++        static const uint32_t m2[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000504u };
++        static const uint32_t m4[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000504u, 0x09080D0Cu };
++        for (int i = 0; i < 4; i++) t[i] = ppc_minps(ppc_maxps(g[i], 0x403F8001u), 0x40407FFFu);
++        ppc_pshufb(t, type == 1 ? m2 : m4, d);
++        break;
++    }
++    case 2: // NORMPACKED32 2_10_10_10
++    {
++        static const uint32_t lo[4] = { 0x403FFE01u, 0x403FFE01u, 0x403FFE01u, 0x40400000u };
++        static const uint32_t hi[4] = { 0x404001FFu, 0x404001FFu, 0x404001FFu, 0x40400003u };
++        static const uint32_t mk[4] = { 0x3FFu, 0x3FFu, 0x3FFu, 0x3u };
++        uint32_t r = 0;
++        for (int i = 0; i < 4; i++) r |= (ppc_minps(ppc_maxps(g[i], lo[i]), hi[i]) & mk[i]) << (10 * i);
++        for (int i = 0; i < 4; i++) d[i] = r;
++        break;
++    }
++    case 3: // FLOAT16_2
++    case 5: // FLOAT16_4
++    {
++        static const uint32_t m2[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000302u };
++        static const uint32_t m4[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0x01000302u, 0x05040706u };
++        uint32_t h[4] = {
++            ppc_f32_to_f16_rz(g[0]) | (uint32_t(ppc_f32_to_f16_rz(g[1])) << 16),
++            ppc_f32_to_f16_rz(g[2]) | (uint32_t(ppc_f32_to_f16_rz(g[3])) << 16), 0, 0 };
++        ppc_pshufb(h, type == 3 ? m2 : m4, d);
++        break;
++    }
++    case 6: // NORMPACKED64 4_20_20_20
++    {
++        static const uint32_t lo[4] = { 0x40380001u, 0x40380001u, 0x40380001u, 0x40400000u };
++        static const uint32_t hi[4] = { 0x4047FFFFu, 0x4047FFFFu, 0x4047FFFFu, 0x4040000Fu };
++        static const uint32_t mk[4] = { 0xFFFFFu, 0xFFFFFu, 0xFFFFFu, 0xFu };
++        static const uint32_t xz[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0A0908FFu, 0xFF020100u };
++        static const uint32_t yw[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0CFFFF06u, 0x0504FFFFu };
++        uint32_t s4[4], a[4], c[4];
++        for (int i = 0; i < 4; i++)
++        {
++            t[i] = ppc_minps(ppc_maxps(g[i], lo[i]), hi[i]) & mk[i];
++            s4[i] = t[i] << 4;
++        }
++        ppc_pshufb(t, xz, a);
++        ppc_pshufb(s4, yw, c);
++        for (int i = 0; i < 4; i++) d[i] = a[i] | c[i];
++        break;
++    }
++    default:
++        return false;
++    }
++    // Insertion permute: (source, word) per destination word; source 0 is the
++    // previous vd, 1 the packed value.
++    static const uint8_t perm[3][4][8] = {
++        { { 0,0, 0,1, 0,2, 1,3 }, { 0,0, 0,1, 1,3, 0,3 }, { 0,0, 1,3, 0,2, 0,3 }, { 1,3, 0,1, 0,2, 0,3 } },
++        { { 0,0, 0,1, 1,2, 1,3 }, { 0,0, 1,2, 1,3, 0,3 }, { 1,2, 1,3, 0,2, 0,3 }, { 1,3, 0,1, 0,2, 0,3 } },
++        { { 0,0, 0,1, 1,2, 1,3 }, { 0,0, 1,2, 1,3, 0,3 }, { 1,2, 1,3, 0,2, 0,3 }, { 0,0, 0,1, 0,2, 1,2 } },
++    };
++    if (pack < 1 || pack > 3 || shift > 3)
++        return false;
++    uint32_t prev[4], out[4];
++    for (int i = 0; i < 4; i++) prev[i] = vd.u32[3 - i];
++    const uint8_t* p = perm[pack - 1][shift];
++    for (int w = 0; w < 4; w++) out[w] = p[2 * w] ? d[p[2 * w + 1]] : prev[p[2 * w + 1]];
++    for (int i = 0; i < 4; i++) vd.u32[3 - i] = out[i];
++    return true;
++}
++
++inline bool ppc_vupkd3d128(PPCVRegister& vd, const PPCVRegister& vb, uint32_t type)
++{
++    uint32_t g[4], t[4], r[4];
++    for (int i = 0; i < 4; i++) g[i] = vb.u32[3 - i];
++    auto overflow = [&](uint32_t bits) { for (int i = 0; i < 4; i++) if (r[i] == bits) r[i] = 0x7FC00000u; };
++    switch (type)
++    {
++    case 0: // D3DCOLOR
++    {
++        static const uint32_t m[4] = { 0xFFFFFF0Eu, 0xFFFFFF0Du, 0xFFFFFF0Cu, 0xFFFFFF0Fu };
++        ppc_pshufb(g, m, r);
++        for (int i = 0; i < 4; i++) r[i] |= 0x3F800000u;
++        break;
++    }
++    case 1: // NORMSHORT2
++    case 4: // NORMSHORT4
++    {
++        static const uint32_t m2[4] = { 0xFFFF0F0Eu, 0xFFFF0D0Cu, 0xFFFFFFFFu, 0xFFFFFFFFu };
++        static const uint32_t m4[4] = { 0xFFFF0B0Au, 0xFFFF0908u, 0xFFFF0F0Eu, 0xFFFF0D0Cu };
++        static const uint32_t add2[4] = { 0x40400000u, 0x40400000u, 0x00000000u, 0x3F800000u };
++        ppc_pshufb(g, type == 1 ? m2 : m4, t);
++        for (int i = 0; i < 4; i++)
++            r[i] = uint32_t(int32_t(t[i] << 16) >> 16) + (type == 1 ? add2[i] : 0x40400000u);
++        overflow(0x403F8000u);
++        break;
++    }
++    case 2: // NORMPACKED32 2_10_10_10
++    {
++        static const uint32_t add[4] = { 0x40400000u, 0x40400000u, 0x40400000u, 0x3F800000u };
++        for (int i = 0; i < 4; i++)
++        {
++            uint32_t v = (g[3] >> (10 * i)) & (i == 3 ? 0x3u : 0x3FFu);
++            r[i] = uint32_t(int32_t(v << 22) >> 22) + add[i];
++        }
++        overflow(0x403FFE00u);
++        break;
++    }
++    case 3: // FLOAT16_2
++    case 5: // FLOAT16_4
++    {
++        static const uint32_t m2[4] = { 0x0D0C0F0Eu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
++        static const uint32_t m4[4] = { 0x09080B0Au, 0x0D0C0F0Eu, 0xFFFFFFFFu, 0xFFFFFFFFu };
++        ppc_pshufb(g, type == 3 ? m2 : m4, t);
++        uint32_t f[4] = { ppc_f16_to_f32(uint16_t(t[0])), ppc_f16_to_f32(uint16_t(t[0] >> 16)),
++                          ppc_f16_to_f32(uint16_t(t[1])), ppc_f16_to_f32(uint16_t(t[1] >> 16)) };
++        if (type == 3)
++        {
++            r[0] = f[0]; r[1] = f[1]; r[2] = f[2]; r[3] = f[2] | 0x3F800000u;
++        }
++        else
++        {
++            for (int i = 0; i < 4; i++) r[i] = f[i];
++        }
++        break;
++    }
++    case 6: // NORMPACKED64 4_20_20_20
++    {
++        static const uint32_t m[4] = { 0xFF0E0D0Cu, 0xFF0B0A09u, 0xFF080F0Eu, 0xFFFFFF0Bu };
++        static const uint32_t add[4] = { 0x40400000u, 0x40400000u, 0x40400000u, 0x3F800000u };
++        ppc_pshufb(g, m, t);
++        uint32_t x[4] = { t[0], t[2] >> 4, t[1], t[3] >> 4 };
++        for (int i = 0; i < 4; i++) r[i] = uint32_t(int32_t(x[i] << 12) >> 12) + add[i];
++        overflow(0x40380000u);
++        break;
++    }
++    default:
++        return false;
++    }
++    for (int i = 0; i < 4; i++) vd.u32[3 - i] = r[i];
++    return true;
++}
++
+ #if defined(__aarch64__) || defined(_M_ARM64)
+ inline uint64_t __rdtsc()
+ {

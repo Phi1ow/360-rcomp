@@ -1,0 +1,17 @@
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -200,8 +200,14 @@
+ }
+ 
+ extern "C" void rcomp_profile_register_host_thread() __attribute__((weak));
++extern "C" void rcomp_profile_unregister_host_thread() __attribute__((weak));
+ void CommandProcessor::WorkerThreadMain() {
+   if (rcomp_profile_register_host_thread) rcomp_profile_register_host_thread();  // bring-up profiling
++  struct ProfileRetirement {
++    ~ProfileRetirement() {
++      if (rcomp_profile_unregister_host_thread) rcomp_profile_unregister_host_thread();
++    }
++  } profile_retirement;
+   if (!SetupContext()) {
+     rex::FatalError("Unable to setup command processor internal state");
+     return;

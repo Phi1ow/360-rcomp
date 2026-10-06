@@ -1,0 +1,155 @@
+diff -ruN a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 13:07:33.928475963 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 15:22:31.194543250 +0000
+@@ -1714,25 +1714,8 @@
+         // no op
+         break;
+ 
+-    case PPC_INST_TDLGEI:
+-        // no op
+-        break;
+-
+-    case PPC_INST_TDLLEI:
+-        // no op
+-        break;
+-
+-    case PPC_INST_TWI:
+-        // no op
+-        break;
+-
+-    case PPC_INST_TWLGEI:
+-        // no op
+-        break;
+-
+-    case PPC_INST_TWLLEI:
+-        // no op
+-        break;
++    // TDLGEI/TDLLEI/TWI/TWLGEI/TWLLEI were silent no-ops here; they are
++    // handled with the rest of the trap family below (R-comp patch 0001).
+ 
+     case PPC_INST_VADDFP:
+     case PPC_INST_VADDFP128:
+@@ -2263,6 +2246,107 @@
+         println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
+         break;
+ 
++    // ---- R-comp patch 0001: integer carry/extended forms, eqv, mulhd[u],
++    // rlwnm, and the tw/twi/td/tdi trap family. CA follows this file's
++    // existing 32-bit convention (addic/adde/addze/subfe); record forms use
++    // the same compare<int32_t> as the neighbouring instructions.
++    case PPC_INST_ADDC:
++        println("\t{}.ca = {}.u32 + {}.u32 < {}.u32;", xer(), r(insn.operands[1]), r(insn.operands[2]), r(insn.operands[1]));
++        println("\t{}.u64 = {}.u64 + {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_ADDME:
++        // rD = rA + CA - 1; carry out of rA + 0xFFFFFFFF + CA.
++        println("\t{}.u64 = {}.u64 + {}.ca - 1;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.ca = ({}.u32 != 0) | {}.ca;", xer(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_SUBFME:
++        // rD = ~rA + CA - 1; carry out of ~rA + 0xFFFFFFFF + CA.
++        println("\t{}.u64 = ~{}.u64 + {}.ca - 1;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.ca = ({}.u32 != 0xFFFFFFFF) | {}.ca;", xer(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_SUBFZE:
++        // rD = ~rA + CA; carry out of ~rA + CA.
++        println("\t{}.u64 = ~{}.u64 + {}.ca;", temp(), r(insn.operands[1]), xer());
++        println("\t{}.ca = ({}.u32 == 0) & {}.ca;", xer(), r(insn.operands[1]), xer());
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), temp());
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_EQV:
++        println("\t{}.u64 = ~({}.u64 ^ {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_MULHD:
++        println("\t{}.s64 = int64_t((__int128({}.s64) * __int128({}.s64)) >> 64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_MULHDU:
++        println("\t{}.u64 = uint64_t((unsigned __int128)({}.u64) * (unsigned __int128)({}.u64) >> 64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_RLWNM:
++        println("\t{}.u64 = __builtin_rotateleft64({}.u32 | ({}.u64 << 32), {}.u8 & 0x1F) & 0x{:X};", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[1]), r(insn.operands[2]), ComputeMask(insn.operands[3] + 32, insn.operands[4] + 32));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_TRAP:
++    case PPC_INST_TW: case PPC_INST_TWI: case PPC_INST_TD: case PPC_INST_TDI:
++    case PPC_INST_TWLT: case PPC_INST_TWLE: case PPC_INST_TWEQ: case PPC_INST_TWGE: case PPC_INST_TWGT: case PPC_INST_TWNE:
++    case PPC_INST_TWLLT: case PPC_INST_TWLLE: case PPC_INST_TWLGE: case PPC_INST_TWLGT:
++    case PPC_INST_TWLTI: case PPC_INST_TWLEI: case PPC_INST_TWEQI: case PPC_INST_TWGEI: case PPC_INST_TWGTI: case PPC_INST_TWNEI:
++    case PPC_INST_TWLLTI: case PPC_INST_TWLLEI: case PPC_INST_TWLGEI: case PPC_INST_TWLGTI:
++    case PPC_INST_TDLT: case PPC_INST_TDLE: case PPC_INST_TDEQ: case PPC_INST_TDGE: case PPC_INST_TDGT: case PPC_INST_TDNE:
++    case PPC_INST_TDLLT: case PPC_INST_TDLLE: case PPC_INST_TDLGE: case PPC_INST_TDLGT:
++    case PPC_INST_TDLTI: case PPC_INST_TDLEI: case PPC_INST_TDEQI: case PPC_INST_TDGEI: case PPC_INST_TDGTI: case PPC_INST_TDNEI:
++    case PPC_INST_TDLLTI: case PPC_INST_TDLLEI: case PPC_INST_TDLGEI: case PPC_INST_TDLGTI:
++    {
++        // Decode from the instruction word so every simplified mnemonic
++        // shares one definition. TO bits (Power ISA): 16 lt, 8 gt, 4 eq,
++        // 2 ltu, 1 gtu. Word forms compare the low 32 bits; SI is sign
++        // extended and, for the unsigned tests, reinterpreted as unsigned.
++        const uint32_t w = insn.instruction;
++        const uint32_t primary = w >> 26, to = (w >> 21) & 0x1F, ra = (w >> 16) & 0x1F, rb = (w >> 11) & 0x1F;
++        const bool imm = primary == 2 || primary == 3;
++        const bool dword = primary == 2 || (primary == 31 && ((w >> 1) & 0x3FF) == 68);
++        const int32_t si = int16_t(w & 0xFFFF);
++        const char* s = dword ? "s64" : "s32";
++        const char* u = dword ? "u64" : "u32";
++        std::string rhs_s = imm ? fmt::format("{}", dword ? int64_t(si) : int64_t(si)) : fmt::format("{}.{}", r(rb), s);
++        std::string rhs_u = imm ? (dword ? fmt::format("0x{:X}ull", uint64_t(int64_t(si))) : fmt::format("0x{:X}u", uint32_t(si)))
++                                : fmt::format("{}.{}", r(rb), u);
++        std::string cond;
++        auto add = [&](const std::string& c) { cond += (cond.empty() ? "" : " || ") + c; };
++        if (to & 16) add(fmt::format("{}.{} < {}", r(ra), s, rhs_s));
++        if (to & 8) add(fmt::format("{}.{} > {}", r(ra), s, rhs_s));
++        if (to & 4) add(fmt::format("{}.{} == {}", r(ra), u, rhs_u));
++        if (to & 2) add(fmt::format("{}.{} < {}", r(ra), u, rhs_u));
++        if (to & 1) add(fmt::format("{}.{} > {}", r(ra), u, rhs_u));
++        if (to == 0x1F)
++            println("\tPPC_TRAP(0x{:X});", base);
++        else if (!cond.empty())
++            println("\tif ({}) PPC_TRAP(0x{:X});", cond, base);
++        break;
++    }
++
+     default:
+         return false;
+     }
+diff -ruN a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-09-25 13:07:33.930644153 +0000
++++ b/XenonUtils/ppc_context.h	2026-09-25 15:21:23.004325099 +0000
+@@ -101,6 +101,12 @@
+ #define PPC_MM_STORE_U64(x, y)  PPC_STORE_U64(x, y)
+ #endif
+ 
++// Guest trap (tw/twi/td/tdi with a true condition). Hosts override it to
++// report the guest address; the default stops the process.
++#ifndef PPC_TRAP
++#define PPC_TRAP(addr) __builtin_trap()
++#endif
++
+ #ifndef PPC_CALL_FUNC
+ #define PPC_CALL_FUNC(x) x(ctx, base)
+ #endif

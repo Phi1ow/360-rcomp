@@ -1,0 +1,6 @@
+# Preserve the captured evidence byte-for-byte across Windows checkouts.
+*.log -text
+# Native Windows JSON reports may contain CRLF; preserve their recorded hash.
+*.json -text whitespace=cr-at-eol
+*.patch -text
+SHA256SUMS text eol=lf

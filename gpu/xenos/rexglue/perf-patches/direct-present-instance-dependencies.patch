@@ -1,0 +1,73 @@
+--- a/include/rex/ui/vulkan/instance.h
++++ b/include/rex/ui/vulkan/instance.h
+@@ -102,6 +102,9 @@
+   // supported (with the `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_surface = false;  // #1
++    // Dependencies of optional VK_EXT_swapchain_maintenance1.
++    bool ext_KHR_get_surface_capabilities2 = false;  // #120
++    bool ext_EXT_surface_maintenance1 = false;      // #275
+ #if defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0011
+     bool ext_KHR_display = false;          // #3
+     bool ext_EXT_headless_surface = false; // #257
+--- a/src/ui/vulkan/vulkan_instance.cpp
++++ b/src/ui/vulkan/vulkan_instance.cpp
+@@ -9,6 +9,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
++#include <cstring>
+ #include <sstream>
+ #include <string>
+ #include <unordered_map>
+@@ -218,6 +220,30 @@
+     }
+     supported_implementation_extensions.resize(supported_implementation_extension_count);
+     break;
++  }
++
++  // Request maintenance only with its complete implementation-provided
++  // dependency chain. Layer-only dependencies could disappear during the
++  // instance-creation retry, so this optional chain deliberately uses the ICD.
++  if (with_surface) {
++    const auto implementation_supports = [&](const char* name) {
++      return std::any_of(supported_implementation_extensions.begin(),
++                         supported_implementation_extensions.end(),
++                         [name](const VkExtensionProperties& extension) {
++                           return std::strcmp(extension.extensionName, name) == 0;
++                         });
++    };
++    if (implementation_supports("VK_KHR_surface") &&
++        implementation_supports("VK_KHR_get_surface_capabilities2")) {
++      requested_extensions.emplace(
++          "VK_KHR_get_surface_capabilities2",
++          &vulkan_instance->extensions_.ext_KHR_get_surface_capabilities2);
++      if (implementation_supports("VK_EXT_surface_maintenance1")) {
++        requested_extensions.emplace(
++            "VK_EXT_surface_maintenance1",
++            &vulkan_instance->extensions_.ext_EXT_surface_maintenance1);
++      }
++    }
+   }
+ 
+   for (const VkExtensionProperties& supported_extension : supported_implementation_extensions) {
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -201,7 +201,15 @@
+   if (with_swapchain) {
+     // #2.
+     XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
+-    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_swapchain_maintenance1)
++    // VK_EXT_swapchain_maintenance1 also requires the enabled instance
++    // extension chain and physical-device feature queries (or Vulkan 1.1).
++    const auto& instance_extensions = vulkan_instance->extensions();
++    if (instance_extensions.ext_KHR_surface &&
++        instance_extensions.ext_KHR_get_surface_capabilities2 &&
++        instance_extensions.ext_EXT_surface_maintenance1 &&
++        get_physical_device_properties2_supported) {
++      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_swapchain_maintenance1)
++    }
+   }
+ 
+   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;

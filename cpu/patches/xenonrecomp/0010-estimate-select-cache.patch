@@ -1,0 +1,267 @@
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -806,6 +806,15 @@
+         // no op
+         break;
+ 
++    case PPC_INST_DCBST:
++        // Coherent CPU-backed guest RAM: validate the addressed byte and
++        // complete CPU visibility before subsequent device/runtime accesses.
++        print("\tPPC_DCBST(uint32_t(");
++        if (insn.operands[0] != 0)
++            print("{}.u32 + ", r(insn.operands[0]));
++        println("{}.u32));", r(insn.operands[1]));
++        break;
++
+     case PPC_INST_DCBT:
+         // no op
+         break;
+@@ -851,7 +860,7 @@
+         break;
+ 
+     case PPC_INST_EIEIO:
+-        // no op
++        println("\t__atomic_thread_fence(__ATOMIC_SEQ_CST);");
+         break;
+ 
+     case PPC_INST_EXTSB:
+@@ -987,6 +996,17 @@
+         println("\t{}.f64 = float(1.0 / {}.f64);", f(insn.operands[0]), f(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_FRSQRTE:
++        printSetFlushMode(false);
++        println("\t{}.u64 = {}.u64;", temp(), f(insn.operands[1]));
++        println("\t{}.u64 = ctx.fpscr.reciprocalSqrtEstimate({}.u64, {}.u64);",
++            f(insn.operands[0]), temp(), f(insn.operands[0]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\tctx.fpscr.copyToCR1({});", cr(1));
++        if (!config.skipMsr)
++            println("\tif ((ctx.msr & 0x900) && ctx.fpscr.reciprocalSqrtRaisesEnabled({}.u64)) PPC_TRAP(0x{:X});", temp(), base);
++        break;
++
+     case PPC_INST_FRSP:
+         printSetFlushMode(false);
+         println("\t{}.f64 = double(float({}.f64));", f(insn.operands[0]), f(insn.operands[1]));
+@@ -1213,7 +1233,7 @@
+         break;
+ 
+     case PPC_INST_LWSYNC:
+-        // no op
++        println("\t__atomic_thread_fence(__ATOMIC_SEQ_CST);");
+         break;
+ 
+     case PPC_INST_LWZ:
+@@ -1245,7 +1265,9 @@
+         break;
+ 
+     case PPC_INST_MFFS:
+-        println("\t{}.u64 = ctx.fpscr.loadFromHost();", f(insn.operands[0]));
++        println("\t{}.u64 = ctx.fpscr.csr;", f(insn.operands[0]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\tctx.fpscr.copyToCR1({});", cr(1));
+         break;
+ 
+     case PPC_INST_MFLR:
+@@ -1288,7 +1310,9 @@
+         break;
+ 
+     case PPC_INST_MTFSF:
+-        println("\tctx.fpscr.storeFromGuest({}.u32);", f(insn.operands[1]));
++        println("\tctx.fpscr.storeFromGuest({}.u32, 0x{:X});", f(insn.operands[1]), insn.operands[0]);
++        if (strchr(insn.opcode->name, '.'))
++            println("\tctx.fpscr.copyToCR1({});", cr(1));
+         break;
+ 
+     case PPC_INST_MTLR:
+@@ -1717,7 +1741,7 @@
+         break;
+ 
+     case PPC_INST_SYNC:
+-        // no op
++        println("\t__atomic_thread_fence(__ATOMIC_SEQ_CST);");
+         break;
+ 
+     // TDLGEI/TDLLEI/TWI/TWLGEI/TWLLEI were silent no-ops here; they are
+@@ -2054,6 +2078,7 @@
+         break;
+ 
+     case PPC_INST_VSEL:
++    case PPC_INST_VSEL128: // VS128 is the old VD128 (implicit mask).
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+ 
+@@ -2437,7 +2462,8 @@
+     if (strchr(insn.opcode->name, '.'))
+     {
+         int lastLine = out.find_last_of('\n', out.size() - 2);
+-        if (out.find("cr0", lastLine + 1) == std::string::npos && out.find("cr6", lastLine + 1) == std::string::npos)
++        if (out.find("cr0", lastLine + 1) == std::string::npos && out.find("cr6", lastLine + 1) == std::string::npos &&
++            !(insn.opcode->id == PPC_INST_FRSQRTE || insn.opcode->id == PPC_INST_MTFSF || insn.opcode->id == PPC_INST_MFFS))
+             fmt::println("{} at {:X} has RC bit enabled but no comparison was generated", insn.opcode->name, base);
+     }
+ #endif
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -12,6 +12,14 @@
+ #include <cstdlib>
+ #include <cstring>
+ 
++// R-comp's guest RAM is CPU-coherent and is copied into Vulkan resources.
++// dcbst must still perform translation/protection as a byte load and order
++// the writeback before later runtime/device operations. No GPU cache alias
++// exists here; cache maintenance for Vulkan allocations belongs to the backend.
++#ifndef PPC_DCBST
++#define PPC_DCBST(ea) do { (void)PPC_LOAD_U8(uint32_t(ea)); __atomic_thread_fence(__ATOMIC_SEQ_CST); } while (0)
++#endif
++
+ #include <x86/avx.h>
+ #include <x86/sse.h>
+ #include <x86/sse4.1.h>
+@@ -235,7 +243,8 @@
+ 
+ struct PPCFPSCRRegister
+ {
+-    uint32_t csr;
++    // Guest FPSCR, not an MXCSR snapshot. Keep this four-byte ABI unchanged.
++    uint32_t csr = 0;
+ 
+     static constexpr size_t HostToGuest[] = { PPC_ROUND_NEAREST, PPC_ROUND_DOWN, PPC_ROUND_UP, PPC_ROUND_TOWARD_ZERO };
+ 
+@@ -281,44 +290,120 @@
+ 
+     inline uint32_t loadFromHost() noexcept
+     {
+-        csr = getcsr();
+-        return HostToGuest[(csr & RoundMask) >> RoundShift];
++        csr = (csr & ~PPC_ROUND_MASK) | HostToGuest[(getcsr() & RoundMask) >> RoundShift];
++        return csr;
+     }
+         
+-    inline void storeFromGuest(uint32_t value) noexcept
++    inline void updateSummaries() noexcept
+     {
+-        csr &= ~RoundMask;
+-        csr |= GuestToHost[value & PPC_ROUND_MASK];
+-        setcsr(csr);
++        constexpr uint32_t invalidCauses = 0x01F80700;
++        csr = (csr & ~0x20000000u) | ((csr & invalidCauses) ? 0x20000000u : 0);
++        const bool enabled = ((csr & 0x20000000u) && (csr & 0x80)) ||
++            ((csr & 0x10000000u) && (csr & 0x40)) || ((csr & 0x08000000u) && (csr & 0x20)) ||
++            ((csr & 0x04000000u) && (csr & 0x10)) || ((csr & 0x02000000u) && (csr & 0x08));
++        csr = (csr & ~0x40000000u) | (enabled ? 0x40000000u : 0);
++    }
++
++    inline void storeFromGuest(uint32_t value, uint32_t fields = 0xFF) noexcept
++    {
++        uint32_t mask = 0;
++        for (unsigned i = 0; i < 8; ++i)
++            if (fields & (1u << i)) mask |= 0xFu << (4 * i);
++        csr = (csr & ~mask) | (value & mask);
++        csr &= ~0x00000800u; // reserved FPSCR bit 20
++        updateSummaries();
++        const uint32_t host = (getcsr() & ~RoundMask) | GuestToHost[csr & PPC_ROUND_MASK];
++        setcsr(host);
++    }
++
++    inline void copyToCR1(PPCCRRegister& cr1) const noexcept
++    {
++        cr1.lt = (csr >> 31) & 1; // FX
++        cr1.gt = (csr >> 30) & 1; // FEX
++        cr1.eq = (csr >> 29) & 1; // VX
++        cr1.so = (csr >> 28) & 1; // OX
++    }
++
++    inline uint64_t reciprocalSqrtEstimate(uint64_t input, uint64_t oldResult) noexcept
++    {
++        constexpr uint64_t sign = 0x8000000000000000ull;
++        constexpr uint64_t exponent = 0x7FF0000000000000ull;
++        constexpr uint64_t fraction = 0x000FFFFFFFFFFFFFull;
++        constexpr uint64_t quiet = 0x0008000000000000ull;
++        const uint64_t magnitude = input & ~sign;
++        uint64_t result;
++        uint32_t exception = 0;
++        if ((input & exponent) == exponent && (input & fraction)) {
++            result = input | quiet;
++            if (!(input & quiet)) exception = 0x01000000u; // VXSNAN
++        } else if (magnitude == 0) {
++            result = (input & sign) | exponent;
++            exception = 0x04000000u; // ZX (both signs of zero)
++        } else if (input & sign) {
++            result = exponent | quiet;
++            exception = 0x00000200u; // VXSQRT
++        } else if (magnitude == exponent) {
++            result = 0;
++        } else {
++            double value, estimate;
++            memcpy(&value, &input, sizeof value);
++            // An ISA-conforming estimate, not a bit-exact Xenon lookup table.
++            // Positive finite binary64 inputs cannot underflow/overflow here.
++            estimate = 1.0 / std::sqrt(value);
++            memcpy(&result, &estimate, sizeof result);
++        }
++        if (exception & ~csr) csr |= 0x80000000u; // FX on newly raised cause
++        csr |= exception;
++        updateSummaries();
++        // FR/FI and XX are architecturally undefined for frsqrte. Choose FR/FI=0,
++        // leave XX sticky. Enabled invalid/zero-divide preserves FRT and FPRF.
++        csr &= ~0x00060000u;
++        if ((exception == 0x04000000u && (csr & 0x10)) ||
++            ((exception & 0x01000200u) && (csr & 0x80))) return oldResult;
++        uint32_t classification;
++        const uint64_t absResult = result & ~sign;
++        if (absResult > exponent) classification = 0x11; // QNaN
++        else if (absResult == exponent) classification = (result & sign) ? 0x09 : 0x05;
++        else if (absResult == 0) classification = (result & sign) ? 0x12 : 0x02;
++        else classification = (result & sign) ? 0x08 : 0x04;
++        csr = (csr & ~0x0001F000u) | (classification << 12);
++        return result;
++    }
++
++    inline bool reciprocalSqrtRaisesEnabled(uint64_t input) const noexcept
++    {
++        const uint64_t magnitude = input & 0x7FFFFFFFFFFFFFFFull;
++        const bool nan = magnitude > 0x7FF0000000000000ull;
++        if (magnitude == 0) return (csr & 0x10) != 0;
++        const bool invalid = nan ? !(input & 0x0008000000000000ull) : (input >> 63) != 0;
++        return invalid && (csr & 0x80);
+     }
+ 
+     inline void enableFlushModeUnconditional() noexcept
+     {
+-        csr |= FlushMask;
+-        setcsr(csr);
++        setcsr(getcsr() | FlushMask);
+     }
+ 
+     inline void disableFlushModeUnconditional() noexcept
+     {
+-        csr &= ~FlushMask;
+-        setcsr(csr);
++        setcsr(getcsr() & ~FlushMask);
+     }
+ 
+     inline void enableFlushMode() noexcept
+     {
+-        if ((csr & FlushMask) != FlushMask) [[unlikely]]
++        const uint32_t host = getcsr();
++        if ((host & FlushMask) != FlushMask) [[unlikely]]
+         {
+-            csr |= FlushMask;
+-            setcsr(csr);
++            setcsr(host | FlushMask);
+         }
+     }
+ 
+     inline void disableFlushMode() noexcept
+     {
+-        if ((csr & FlushMask) != 0) [[unlikely]]
++        const uint32_t host = getcsr();
++        if ((host & FlushMask) != 0) [[unlikely]]
+         {
+-            csr &= ~FlushMask;
+-            setcsr(csr);
++            setcsr(host & ~FlushMask);
+         }
+     }
+ };

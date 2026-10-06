@@ -1,0 +1,93 @@
+--- a/gpu/xenos/rexglue/rcomp/vulkan_output.h
++++ b/gpu/xenos/rexglue/rcomp/vulkan_output.h
+@@ -30,7 +30,10 @@
+     // the backend needs, presenter) is not available. with_display: the
+     // instance must support a presentation surface (a title); without it the
+     // output is headless (host tests capture it).
+-    static std::unique_ptr<VulkanOutput> Create(bool with_display, std::string* error);
++    // Scales internal Xenos rendering; display-mode registers retain guest size.
++    // Explicit title configuration overrides resolution cvars in the environment.
++    static std::unique_ptr<VulkanOutput> Create(bool with_display, std::string* error,
++                                               uint32_t scale_x = 1, uint32_t scale_y = 1);
+     ~VulkanOutput();
+ 
+     // Fills the provider/presenter fields of a HostConfig for gpu_start.
+@@ -49,6 +52,7 @@
+ 
+ private:
+     VulkanOutput() = default;
++    uint32_t draw_resolution_scale_x_ = 1, draw_resolution_scale_y_ = 1;
+     std::unique_ptr<rex::ui::GraphicsProvider> provider_;
+     std::unique_ptr<rex::ui::Presenter> presenter_;
+ };
+--- a/gpu/xenos/rexglue/rcomp/vulkan_output.cpp
++++ b/gpu/xenos/rexglue/rcomp/vulkan_output.cpp
+@@ -2,8 +2,10 @@
+ #include "vulkan_output.h"
+ 
+ #include <string.h>
++#include <cstdio>
+ 
+ #include <rex/graphics/vulkan/command_processor.h>
++#include <rex/graphics/pipeline/texture/cache.h>
+ #include <rex/ui/presenter.h>
+ #include <rex/ui/vulkan/presenter.h>
+ #include <rex/ui/vulkan/provider.h>
+@@ -23,21 +25,41 @@
+ }
+ }  // namespace
+ 
+-std::unique_ptr<VulkanOutput> VulkanOutput::Create(bool with_display, std::string* error) {
+-    // R-comp default: synchronous shader compilation. rexglue's asynchronous
+-    // mode draws with a placeholder pipeline (the draw is lost) and may skip
+-    // presenting the frame until the real pipeline exists; draws are never
+-    // dropped here. REX_ASYNC_SHADER_COMPILATION=1 restores it explicitly.
+-    if (!getenv("REX_ASYNC_SHADER_COMPILATION") && !rex::cvar::SetFlagByName("async_shader_compilation", "false")) {
++std::unique_ptr<VulkanOutput> VulkanOutput::Create(bool with_display, std::string* error,
++                                                   uint32_t scale_x, uint32_t scale_y) {
++    constexpr uint32_t max_scale = rex::graphics::TextureCache::kMaxDrawResolutionScaleAlongAxis;
++    if (!scale_x || !scale_y || scale_x > max_scale || scale_y > max_scale) {
++        if (error) *error = "draw resolution scale must be within 1.." + std::to_string(max_scale);
++        return nullptr;
++    }
++    if (!rex::cvar::SetFlagByName("resolution_scale", "1") ||
++        !rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(scale_x)) ||
++        !rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(scale_y))) {
++        if (error) *error = "cannot configure draw resolution scale";
++        return nullptr;
++    }
++    uint32_t effective_x = 0, effective_y = 0;
++    if (!rex::graphics::TextureCache::GetConfigDrawResolutionScale(effective_x, effective_y) ||
++        effective_x != scale_x || effective_y != scale_y) {
++        if (error) *error = "draw resolution scale was clamped or overridden";
++        return nullptr;
++    }
++    // Async placeholders currently discard draws. No environment override may
++    // select that path while R-comp requires every submitted draw to execute.
++    if (!rex::cvar::SetFlagByName("async_shader_compilation", "false")) {
+         if (error) *error = "cannot disable async_shader_compilation";
+         return nullptr;
+     }
++    std::fprintf(stderr, "RCOMP-RESOLUTION requested=%ux%u effective=%ux%u source=title_config\n",
++                 scale_x, scale_y, effective_x, effective_y);
+     // PS5_Vulkan has neither geometryShader nor fillModeNonSolid; the backend
+     // has fallbacks for both (primitive expansion in the vertex shader, solid
+     // fill for line/point polygon modes), so they are not required.
+     rex::cvar::SetFlagByName("vulkan_require_geometry_shader", "false");
+     rex::cvar::SetFlagByName("vulkan_require_fill_mode_non_solid", "false");
+     std::unique_ptr<VulkanOutput> out(new VulkanOutput());
++    out->draw_resolution_scale_x_ = effective_x;
++    out->draw_resolution_scale_y_ = effective_y;
+     auto provider = rex::ui::vulkan::VulkanProvider::Create(/*with_gpu_emulation=*/true, with_display);
+     if (!provider) {
+         if (error) *error = "no Vulkan device usable for GPU emulation (see the log for the missing feature)";
+@@ -60,6 +82,9 @@
+ void VulkanOutput::Attach(HostConfig& cfg) const {
+     cfg.provider = provider_.get();
+     cfg.presenter = presenter_.get();
++    std::fprintf(stderr, "RCOMP-RESOLUTION source_display=%ux%u draw_scale=%ux%u\n",
++                 cfg.display_width, cfg.display_height,
++                 draw_resolution_scale_x_, draw_resolution_scale_y_);
+ }
+ 
+ BackendFactory VulkanOutput::backend_factory() const {

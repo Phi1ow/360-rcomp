@@ -1,0 +1,17 @@
+23:59:48 status before: ok idle
+23:59:48 $ ps5_ftp_kit.py push D:\emu 4\kit\ps5-kit\3-m3-program\PPSA88360 -> exit 0
+23:59:48   deleting previous /data/homebrew/PPSA88360
+23:59:48     /data/homebrew/PPSA88360/eboot.bin (586586 bytes)
+23:59:48     /data/homebrew/PPSA88360/manifest.sha256 (431 bytes)
+23:59:48     /data/homebrew/PPSA88360/fixtures/m3/data/m3.bin (300 bytes)
+23:59:48     /data/homebrew/PPSA88360/sce_module/libc.prx (1284674 bytes)
+23:59:48     /data/homebrew/PPSA88360/sce_sys/icon0.png (1496 bytes)
+23:59:48     /data/homebrew/PPSA88360/sce_sys/param.json (734 bytes)
+23:59:48   OK: 6 files in /data/homebrew/PPSA88360, sizes checked. Launch PPSA88360 on the console now.
+23:59:52 chmod: chmodtitle: /data/homebrew/PPSA88360 fixed=12 failed=0
+23:59:55 launch: ok launched PPSA88360 result=0x0000c018 via lncUtilApp/foreground as user 395971800 (the console reports the title running)
+00:00:25 title never seen running after 30s: ok procs app=4294967295 title= count=0 pids=
+00:00:25 status after: ok idle
+00:00:28 $ ps5_ftp_kit.py pull --out D:\emu 4\ps5-logs\3-m3-program -> exit 0
+00:00:28   downloaded /data/homebrew/PPSA88360/rcomp_title.log -> D:\emu 4\ps5-logs\3-m3-program\rcomp_title.log
+00:00:28   verdict: NO END LINE (the title stopped before the end)

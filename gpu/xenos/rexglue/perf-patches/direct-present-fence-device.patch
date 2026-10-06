@@ -1,0 +1,61 @@
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -168,6 +168,9 @@
+     // VK_EXT_robustness2
+ 
+     bool nullDescriptor = false;
++
++    // VK_EXT_swapchain_maintenance1: actual enabled optional feature.
++    bool swapchainMaintenance1 = false;
+   };
+ 
+   // Properties of the core API and enabled extensions, and enabled features.
+@@ -181,6 +184,7 @@
+   // the Vulkan API they were promoted to it supported (with the
+   // `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
++    bool ext_EXT_swapchain_maintenance1 = false;
+     bool ext_KHR_swapchain = false;                     // #2
+     bool ext_1_1_KHR_dedicated_allocation = false;      // #128
+     bool ext_EXT_shader_stencil_export = false;         // #141
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -201,6 +201,7 @@
+   if (with_swapchain) {
+     // #2.
+     XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
++    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_swapchain_maintenance1)
+   }
+ 
+   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
+@@ -335,6 +336,9 @@
+   VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
+                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT>
+       features_EXT_robustness2;
++  VulkanFeatures<VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT,
++                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT>
++      features_EXT_swapchain_maintenance1;
+ 
+   if (get_physical_device_properties2_supported) {
+     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+@@ -375,6 +379,9 @@
+     }
+     if (device->extensions_.ext_EXT_robustness2) {
+       features_EXT_robustness2.Link(supported_features_2, device_create_info);
++    }
++    if (device->extensions_.ext_EXT_swapchain_maintenance1) {
++      features_EXT_swapchain_maintenance1.Link(supported_features_2, device_create_info);
+     }
+     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
+     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
+@@ -731,6 +738,10 @@
+     }
+   }
+ 
++  if (device->extensions_.ext_EXT_swapchain_maintenance1 && with_swapchain) {
++    XE_UI_VULKAN_FEATURE_2(features_EXT_swapchain_maintenance1, swapchainMaintenance1)
++  }
++
+ #undef XE_UI_VULKAN_LIMIT
+ #undef XE_UI_VULKAN_ENUM_LIMIT
+ #undef XE_UI_VULKAN_FEATURE

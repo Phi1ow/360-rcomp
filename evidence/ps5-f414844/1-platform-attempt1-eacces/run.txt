@@ -1,0 +1,14 @@
+23:56:11 status before: ok idle
+23:56:12 $ ps5_ftp_kit.py push D:\emu 4\kit\ps5-kit\1-platform\PPSA88360 -> exit 0
+23:56:12   deleting previous /data/homebrew/PPSA88360
+23:56:12     /data/homebrew/PPSA88360/eboot.bin (37354 bytes)
+23:56:12     /data/homebrew/PPSA88360/manifest.sha256 (339 bytes)
+23:56:12     /data/homebrew/PPSA88360/sce_module/libc.prx (1284674 bytes)
+23:56:12     /data/homebrew/PPSA88360/sce_sys/icon0.png (1496 bytes)
+23:56:12     /data/homebrew/PPSA88360/sce_sys/param.json (734 bytes)
+23:56:12   OK: 5 files in /data/homebrew/PPSA88360, sizes checked. Launch PPSA88360 on the console now.
+23:56:36 launch: err launch PPSA88360 foreground user 395971800, login user 395971800, attempts: lncUtilApp/foreground(user 395971800)=0x80aa001a, lncUtilApp/login(user 395971800)=0x80aa001a, syste
+23:57:06 title never seen running after 30s: ok procs app=4294967295 title= count=0 pids=
+23:57:07 status after: ok idle
+23:57:09 $ ps5_ftp_kit.py pull --out D:\emu 4\ps5-logs\1-platform -> exit 1
+23:57:09   no rcomp_title.log on the console (title not started, or it crashed before opening its log)

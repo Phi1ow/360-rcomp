@@ -1,0 +1,4 @@
+/* R-comp PS5 title: nothing is exported (the converter only accepts imports). */
+{
+    local: *;
+};

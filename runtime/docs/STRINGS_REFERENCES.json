@@ -1,0 +1,85 @@
+{
+  "contract": "R-comp Xbox/NT string helpers; deterministic ANSI profile windows-1252",
+  "primary_references": [
+    {
+      "name": "Microsoft Learn: RtlMultiByteToUnicodeN",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-rtlmultibytetounicoden",
+      "used_for": "ACP semantics, counted output, truncation success, non-overlap, no implicit terminator"
+    },
+    {
+      "name": "Microsoft Learn: RtlUnicodeToMultiByteN",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-rtlunicodetomultibyten",
+      "used_for": "ACP semantics, counted output, truncation success, non-overlap"
+    },
+    {
+      "name": "Microsoft Learn: RtlUnicodeStringToAnsiString",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlunicodestringtoansistring",
+      "used_for": "locale conversion, AllocateDestinationString ownership and RtlFreeAnsiString pairing"
+    },
+    {
+      "name": "Microsoft Learn: RtlFreeAnsiString",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlfreeansistring",
+      "used_for": "free contract"
+    },
+    {
+      "name": "Microsoft Learn: RtlUpcaseUnicodeChar",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlupcaseunicodechar",
+      "used_for": "single Unicode-character uppercase contract"
+    },
+    {
+      "name": "Microsoft Learn: RtlNtStatusToDosError",
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-rtlntstatustodoserror",
+      "used_for": "NTSTATUS to system-error contract and ERROR_MR_MID_NOT_FOUND fallback"
+    },
+    {
+      "name": "Microsoft Open Specifications [MS-UCODEREF] 2.2.1",
+      "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-ucoderef/28fefe92-d66c-4b03-90a9-97b473223d43",
+      "used_for": "active ANSI code-page model and code page 1252 identity"
+    },
+    {
+      "name": "Microsoft Open Specifications [MS-UCODEREF] 2.2.2",
+      "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-ucoderef/d167d756-0c58-4564-a0de-77c647d367fa",
+      "used_for": "bestfitxxxx data-file authority"
+    },
+    {
+      "name": "Unicode Consortium / Microsoft WindowsBestFit bestfit1252.txt",
+      "url": "https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WindowsBestFit/bestfit1252.txt",
+      "sha256": "72ea23c939c5b26fae7aded0207b327e2f3902d7d3c168d7087f5cfc38ee76a9",
+      "used_for": "complete CP1252 byte-to-Unicode and Unicode-to-byte best-fit tables"
+    },
+    {
+      "name": "NIST FIPS PUB 180-4 Secure Hash Standard",
+      "url": "https://csrc.nist.gov/pubs/fips/180-4/upd1/final",
+      "used_for": "independent SHA-1 algorithm and standard vectors for XeCryptSha"
+    }
+  ],
+  "oracles": [
+    {
+      "name": "Windows ntdll.dll",
+      "file_version": "10.0.26100.9278",
+      "sha256": "a74f7482085eab125ccc09152ab7e0b5994bcb13e1a7b29880bdbb24179ecb8b",
+      "used_for": "RtlUpcaseUnicodeChar BMP table and RtlNtStatusToDosError outputs; descriptor/truncation differential observations"
+    },
+    {
+      "name": "Microsoft Windows SDK ntstatus.h",
+      "sdk": "10.0.26100.0",
+      "sha256": "50bfd57f92dd01c93c1960292aa428e3323043dc947cf15c0dfa6cfec0778ae6",
+      "used_for": "2969 unique public NTSTATUS values enumerated for the conversion table"
+    }
+  ],
+  "ordinal_reference": {
+    "name": "Vendored XenonRecomp xboxkrnl export table",
+    "commit": "ddd128bcca99fe8bfbb99bea583c972351fa6ace",
+    "path": "third_party/XenonRecomp/XenonUtils/xbox/xboxkrnl_table.inc",
+    "sha256": "99bbdad7faaec18ce627eca28f0900b8e4a47c372000e43f85b447f07a2683ba",
+    "scope": "names and ordinals only"
+  },
+  "abi_cross_checks": {
+    "XeCryptSha": {
+      "source": "Xenia Canary xboxkrnl_crypt.cc",
+      "commit": "c332733afd14ed3aeb08b38d0cabffa58d1c8c2f",
+      "sha256": "b233267b9a8182229a7ca5bbded45d32e9a22ba4fc2a067db7dc98d837497355",
+      "scope": "eight-argument ABI shape and output truncation only; implementation not copied"
+    }
+  }
+}

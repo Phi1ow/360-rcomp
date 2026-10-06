@@ -1,0 +1,392 @@
+diff -ruN a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -44,6 +44,7 @@
+ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
+ REXCVAR_DECLARE(bool, rcomp_elide_overwritten_transfers);
++REXCVAR_DECLARE(bool, rcomp_elide_overwritten_color_transfers);
+ 
+ // GPU Textures
+ REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
+diff -ruN a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -171,14 +171,16 @@
+ 
+   virtual void BeginFrame();
+ 
+-  // `depth_stencil_overwrite_candidate` (R-comp) is set by the caller for a draw whose state overwrites
+-  // every bit of depth and stencil wherever it is rasterized (a clear drawn as a rectangle list: depth
+-  // and stencil always written, nothing culled, no pixel shader): Update then finds the rectangle the
+-  // draw covers, and the ownership transfers into the part of the depth render target inside it, whose
+-  // contents the draw replaces, are not generated.
++  // `overwrite_candidate_rts` (R-comp) is set by the caller for a draw whose state overwrites every bit
++  // of some render targets wherever it is rasterized: bit 0 the depth and stencil (a clear drawn as a
++  // rectangle list: depth and stencil always written, nothing culled, no pixel shader), bit 1 + i the
++  // color render target i (a rectangle list whose pixel shader cannot discard, with no test that can
++  // fail, a full write mask and no blending that reads the destination). Update then finds the
++  // rectangle the draw covers, and the ownership transfers into the part of those render targets inside
++  // it, whose contents the draw replaces, are not generated.
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                       uint32_t normalized_color_mask, const Shader& vertex_shader,
+-                      bool depth_stencil_overwrite_candidate = false);
++                      uint32_t overwrite_candidate_rts = 0);
+ 
+   // Returns bits where 0 is whether a depth render target is currently bound on
+   // the host and 1... are whether the same applies to color render targets, and
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -246,7 +246,7 @@
+     // Rectangle list draws without a pixel shader: the state that decides whether they overwrite
+     // the depth and stencil, whether they were taken for candidates, and what the estimator found.
+     bool has_state;
+-    bool candidate;
++    uint32_t candidate;  // render targets the draw overwrites entirely: bit 0 depth and stencil, 1 + i color i
+     int estimate_state;
+     float estimate_bounds[4];
+     int estimate_refusal;
+@@ -687,11 +687,17 @@
+     std::vector<VkPipelineStageFlags> wait_stage_masks;
+   };
+   void HandOffChunk(bool last, VkFence fence);
+-  void AsyncChunkIfLarge();
++  // Hands the commands recorded so far to the replay thread when they reach the chunk size (or at once
++  // with `force`).
++  void AsyncChunkIfLarge(bool force = false);
+   void AwaitSubmitted(uint64_t submission);
+   void StopAsyncSubmitThread();
+   void AsyncSubmitRun();
+   bool async_submit_enabled_ = false;
++  // Cached cvars (RenderTargetCache::Update, overwrite_candidate_rts): the draw loop must not look them up.
++  bool elide_overwritten_depth_ = false;
++  bool elide_overwritten_color_ = false;
++  bool force_msaa_1x_ = false;
+   rcomp::xenos::HostThread async_thread_;
+   std::mutex async_mutex_;
+   std::condition_variable async_wake_;
+diff -ruN a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -111,7 +111,7 @@
+ 
+   bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+               uint32_t normalized_color_mask, const Shader& vertex_shader,
+-              bool depth_stencil_overwrite_candidate = false) override;
++              uint32_t overwrite_candidate_rts = 0) override;
+   // Binding information for the last successful update.
+   RenderPassKey last_update_render_pass_key() const { return last_update_render_pass_key_; }
+   VkRenderPass last_update_render_pass() const { return last_update_render_pass_; }
+diff -ruN a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -32,9 +32,12 @@
+                     "Clamp MRT EDRAM used range to minimum");
+ 
+ // R-comp: see RenderTargetCache::Update. The ownership transfers into the part of a depth render
+-// target that a clearing rectangle draw replaces are skipped.
+-REXCVAR_DEFINE_BOOL(rcomp_elide_overwritten_transfers, false, "GPU",
++// target that a clearing rectangle draw replaces are skipped (measured: -0.75 ms of GPU time and +3 %
++// per scene in the scripted run, wave 3 of the audit; on by default).
++REXCVAR_DEFINE_BOOL(rcomp_elide_overwritten_transfers, true, "GPU",
+                     "Skip ownership transfers into the depth and stencil area a clear draw overwrites");
++REXCVAR_DEFINE_BOOL(rcomp_elide_overwritten_color_transfers, false, "GPU",
++                    "Skip ownership transfers into the color area a rectangle draw overwrites entirely");
+ 
+ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, true, "GPU",
+                     "Execute unclipped draw VS on CPU for PSI render backend");
+@@ -405,7 +408,7 @@
+ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+                                uint32_t normalized_color_mask, const Shader& vertex_shader,
+-                               bool depth_stencil_overwrite_candidate) {
++                               uint32_t overwrite_candidate_rts) {
+   const RegisterFile& regs = register_file();
+   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
+ 
+@@ -707,15 +710,14 @@
+   rcomp_last_overwrite_valid_ = false;
+   rcomp_last_estimate_state_ = -1;
+ #endif
+-  // A clear drawn as a rectangle list replaces everything in the depth and stencil of the rectangle:
+-  // what the render targets already held there does not have to be transferred. The rectangle is
+-  // shrunk to the pixels that are surely covered entirely (the vertex positions are rounded inwards
+-  // with a margin of 1/16 of a pixel, which no sample position of 1x, 2x and 4x MSAA falls into) and
+-  // clipped by the scissor.
+-  Transfer::Rectangle depth_overwrite_cutout;
+-  bool depth_overwrite_cutout_valid = false;
+-  if (depth_stencil_overwrite_candidate && !interlock_barrier_only &&
+-      (depth_and_color_rts_used_bits & 1) && REXCVAR_GET(rcomp_elide_overwritten_transfers)) {
++  // A rectangle list that replaces everything in some render targets inside its rectangle (a clear of
++  // the depth and stencil, a full-screen copy into a color target): what the render targets already
++  // held there does not have to be transferred. The rectangle is shrunk to the pixels that are surely
++  // covered entirely (the vertex positions are rounded inwards with a margin of 1/16 of a pixel, which
++  // no sample position of 1x, 2x and 4x MSAA falls into) and clipped by the scissor.
++  Transfer::Rectangle overwrite_cutout;
++  uint32_t overwrite_cutout_rts = 0;
++  if ((overwrite_candidate_rts & depth_and_color_rts_used_bits) && !interlock_barrier_only) {
+     float bounds[4];
+     const bool bounds_valid = draw_extent_estimator_.EstimateRectangleListBounds(vertex_shader, bounds);
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+@@ -743,11 +745,11 @@
+       x0 = std::max(x0, int32_t(0));
+       y0 = std::max(y0, int32_t(0));
+       if (x1 > x0 && y1 > y0) {
+-        depth_overwrite_cutout.x_pixels = uint32_t(x0);
+-        depth_overwrite_cutout.y_pixels = uint32_t(y0);
+-        depth_overwrite_cutout.width_pixels = uint32_t(x1 - x0);
+-        depth_overwrite_cutout.height_pixels = uint32_t(y1 - y0);
+-        depth_overwrite_cutout_valid = true;
++        overwrite_cutout.x_pixels = uint32_t(x0);
++        overwrite_cutout.y_pixels = uint32_t(y0);
++        overwrite_cutout.width_pixels = uint32_t(x1 - x0);
++        overwrite_cutout.height_pixels = uint32_t(y1 - y0);
++        overwrite_cutout_rts = overwrite_candidate_rts & depth_and_color_rts_used_bits;
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+         rcomp_last_overwrite_valid_ = true;
+         rcomp_last_overwrite_[0] = x0;
+@@ -764,8 +766,7 @@
+     ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
+                     interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
+                     nullptr,
+-                    (rt_bit_index == 0 && depth_overwrite_cutout_valid) ? &depth_overwrite_cutout
+-                                                                        : nullptr);
++                    ((overwrite_cutout_rts >> rt_bit_index) & 1) ? &overwrite_cutout : nullptr);
+   }
+ 
+   if (interlock_barrier_only) {
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -77,6 +77,15 @@
+                     "Replay the deferred commands into the Vulkan command buffer on a helper thread "
+                     "while the command processor goes on recording (one submit per submission, in "
+                     "order)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(rcomp_force_msaa_1x, false, "GPU/Vulkan",
++                    "MEASUREMENT ONLY: treat every guest surface as 1x MSAA (changes the emulated semantics)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_INT32(rcomp_async_cpu, -1, "GPU/Vulkan",
++                     "CPU to pin the replay thread to on the PS5 (-1: not pinned)")
++    .range(-1, 15)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ REXCVAR_DEFINE_INT32(rcomp_async_chunk_kib, 256, "GPU/Vulkan",
+@@ -804,6 +813,12 @@
+   }
+   InvalidateAllVertexBufferResidency();
+ 
++  force_msaa_1x_ = REXCVAR_GET(rcomp_force_msaa_1x);
++  if (force_msaa_1x_) {
++    std::fprintf(stderr, "RCOMP-FORCE-MSAA-1X on (measurement only)\n");
++  }
++  elide_overwritten_depth_ = REXCVAR_GET(rcomp_elide_overwritten_transfers);
++  elide_overwritten_color_ = REXCVAR_GET(rcomp_elide_overwritten_color_transfers);
+   async_submit_enabled_ = REXCVAR_GET(rcomp_async_submit);
+   if (async_submit_enabled_) {
+     std::fprintf(stderr, "RCOMP-ASYNC-SUBMIT on chunk_kib=%d\n", int(REXCVAR_GET(rcomp_async_chunk_kib)));
+@@ -2446,6 +2461,9 @@
+   graphics_system_->GetDisplayMode(display_width, display_height);
+   display_width = std::max(uint32_t(1), display_width);
+   display_height = std::max(uint32_t(1), display_height);
++
++  // Everything recorded so far goes to the replay thread now, while the swap commands are recorded.
++  AsyncChunkIfLarge(true);
+ 
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+@@ -3705,6 +3723,61 @@
+   // With clipping disabled the user clip planes are not applied either (see the system constants).
+   return regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable != 0;
+ }
++
++// The color render targets (bit 1 + i for target i) that a rectangle list with a pixel shader replaces
++// entirely wherever it is rasterized: the shader cannot discard, the alpha, depth and stencil tests cannot
++// fail, nothing is culled or clipped, the write mask is full and the blending does not read the
++// destination. See RenderTargetCache::Update.
++uint32_t OverwrittenColorRenderTargets(const RegisterFile& regs, xenos::PrimitiveType prim_type,
++                                       uint32_t index_count, const Shader& pixel_shader,
++                                       const reg::RB_DEPTHCONTROL& depth_control,
++                                       uint32_t normalized_color_mask,
++                                       bool depth_clamp_available) {
++  if (prim_type != xenos::PrimitiveType::kRectangleList || index_count != 3 ||
++      !depth_clamp_available || pixel_shader.kills_pixels()) {
++    return 0;
++  }
++  const auto color_control = regs.Get<reg::RB_COLORCONTROL>();
++  if ((color_control.alpha_test_enable && color_control.alpha_func != xenos::CompareFunction::kAlways) ||
++      color_control.alpha_to_mask_enable) {
++    return 0;
++  }
++  if (depth_control.z_enable && depth_control.zfunc != xenos::CompareFunction::kAlways) {
++    return 0;
++  }
++  if (depth_control.stencil_enable &&
++      (depth_control.stencilfunc != xenos::CompareFunction::kAlways ||
++       (depth_control.backface_enable &&
++        depth_control.stencilfunc_bf != xenos::CompareFunction::kAlways))) {
++    return 0;
++  }
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_su_sc_mode_cntl.cull_front || pa_su_sc_mode_cntl.cull_back ||
++      pa_su_sc_mode_cntl.poly_mode == xenos::PolygonModeEnable::kDualMode ||
++      !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) {
++    return 0;
++  }
++  const auto reads_destination = [](xenos::BlendFactor source, xenos::BlendFactor destination,
++                                    xenos::BlendOp op) {
++    return op == xenos::BlendOp::kMin || op == xenos::BlendOp::kMax ||
++           destination != xenos::BlendFactor::kZero || source == xenos::BlendFactor::kDstColor ||
++           source == xenos::BlendFactor::kOneMinusDstColor || source == xenos::BlendFactor::kDstAlpha ||
++           source == xenos::BlendFactor::kOneMinusDstAlpha;
++  };
++  uint32_t overwritten = 0;
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    if (((normalized_color_mask >> (4 * i)) & 0xF) != 0xF) {
++      continue;
++    }
++    const auto blend = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++    if (reads_destination(blend.color_srcblend, blend.color_destblend, blend.color_comb_fcn) ||
++        reads_destination(blend.alpha_srcblend, blend.alpha_destblend, blend.alpha_comb_fcn)) {
++      continue;
++    }
++    overwritten |= uint32_t(1) << (1 + i);
++  }
++  return overwritten;
++}
+ }  // namespace
+ 
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+@@ -3712,6 +3785,9 @@
+                                        bool major_mode_explicit) {
+   RcompProfScope rcomp_prof_scope(0);
+   RCOMP_PROF_STAMP(rcomp_t_before_loop);
++  if (force_msaa_1x_) {
++    register_file_->values[XE_GPU_REG_RB_SURFACE_INFO] &= ~(UINT32_C(3) << 16);
++  }
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -3975,13 +4051,24 @@
+   // Set up the render targets - this may perform dispatches and draws.
+   {
+     RcompProfScope rcomp_prof_render_targets(32);
+-    const bool depth_stencil_overwrite_candidate =
+-        REXCVAR_GET(rcomp_elide_overwritten_transfers) &&
+-        IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
+-                                           normalized_depth_control, device_properties.depthClamp);
++    uint32_t overwrite_candidate_rts = 0;
++    if (prim_type == xenos::PrimitiveType::kRectangleList) {
++      if (elide_overwritten_depth_ &&
++          IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
++                                             normalized_depth_control,
++                                             device_properties.depthClamp)) {
++        overwrite_candidate_rts |= 1;
++      }
++      if (elide_overwritten_color_ && pixel_shader != nullptr) {
++        overwrite_candidate_rts |=
++            OverwrittenColorRenderTargets(regs, prim_type, index_count, *pixel_shader,
++                                          normalized_depth_control, normalized_color_mask,
++                                          device_properties.depthClamp);
++      }
++    }
+     if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                       normalized_color_mask, *vertex_shader,
+-                                      depth_stencil_overwrite_candidate)) {
++                                      overwrite_candidate_rts)) {
+       return draw_fail("render_target_update");
+     }
+   }
+@@ -4533,10 +4620,17 @@
+     for (uint32_t i = 0; i < 4; ++i) {
+       info.overwrite[i] = render_target_cache_->rcomp_last_overwrite_[i];
+     }
+-    if ((flags & kRectList) && (flags & kNoPixelShader)) {
++    if (flags & kRectList) {
+       info.has_state = true;
+-      info.candidate = IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
+-                                                          normalized_depth_control, device_properties.depthClamp);
++      info.candidate =
++          (IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
++                                              normalized_depth_control, device_properties.depthClamp)
++               ? 1u
++               : 0u) |
++          (pixel_shader ? OverwrittenColorRenderTargets(regs, prim_type, index_count, *pixel_shader,
++                                                        normalized_depth_control, normalized_color_mask,
++                                                        device_properties.depthClamp)
++                        : 0u);
+       info.estimate_state = render_target_cache_->rcomp_last_estimate_state_;
+       info.estimate_refusal = render_target_cache_->rcomp_last_estimate_refusal_;
+       for (uint32_t i = 0; i < 4; ++i) {
+@@ -4773,6 +4867,10 @@
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+ 
++  if (force_msaa_1x_) {
++    register_file_->values[XE_GPU_REG_RB_SURFACE_INFO] &= ~(UINT32_C(3) << 16);
++    register_file_->values[XE_GPU_REG_RB_COPY_CONTROL] &= ~(UINT32_C(7) << 4);
++  }
+   if (!BeginSubmission(true)) {
+     return false;
+   }
+@@ -5657,8 +5755,8 @@
+                    d.estimate_positions[1][0], d.estimate_positions[1][1], d.estimate_positions[1][2],
+                    d.estimate_positions[2][0], d.estimate_positions[2][1], d.estimate_positions[2][2],
+                    d.estimate_positions[3][0], d.estimate_positions[3][1], d.estimate_positions[3][2]);
+-      std::fprintf(stderr, " cand=%d est=%d eb=%.3f,%.3f,%.3f,%.3f dc=%08x sr=%08x,%08x mode=%08x clipc=%08x vte=%08x vtx=%08x woff=%08x",
+-                   int(d.candidate), d.estimate_state, d.estimate_bounds[0], d.estimate_bounds[1],
++      std::fprintf(stderr, " cand=%u est=%d eb=%.3f,%.3f,%.3f,%.3f dc=%08x sr=%08x,%08x mode=%08x clipc=%08x vte=%08x vtx=%08x woff=%08x",
++                   unsigned(d.candidate), d.estimate_state, d.estimate_bounds[0], d.estimate_bounds[1],
+                    d.estimate_bounds[2], d.estimate_bounds[3], d.state_registers[0], d.state_registers[1],
+                    d.state_registers[2], d.state_registers[3], d.state_registers[4], d.state_registers[5],
+                    d.state_registers[6], d.state_registers[7]);
+@@ -7592,7 +7690,16 @@
+   return true;
+ }
+ 
++#if defined(__PROSPERO__)
++extern "C" int scePthreadSetaffinity(pthread_t thread, uint64_t mask);
++#endif
++
+ void VulkanCommandProcessor::AsyncSubmitRun() {
++#if defined(__PROSPERO__)
++  if (REXCVAR_GET(rcomp_async_cpu) >= 0) {
++    scePthreadSetaffinity(pthread_self(), uint64_t(1) << REXCVAR_GET(rcomp_async_cpu));
++  }
++#endif
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+@@ -7710,11 +7817,11 @@
+   async_wake_.notify_one();
+ }
+ 
+-void VulkanCommandProcessor::AsyncChunkIfLarge() {
++void VulkanCommandProcessor::AsyncChunkIfLarge(bool force) {
+   if (!async_submit_enabled_ || !submission_open_) {
+     return;
+   }
+-  const size_t chunk_bytes = size_t(REXCVAR_GET(rcomp_async_chunk_kib)) << 10;
++  const size_t chunk_bytes = force ? 1 : size_t(REXCVAR_GET(rcomp_async_chunk_kib)) << 10;
+   if (deferred_command_buffer_.SizeBytes() < chunk_bytes) {
+     return;
+   }
+diff -ruN a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1495,10 +1495,9 @@
+ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+                                      reg::RB_DEPTHCONTROL normalized_depth_control,
+                                      uint32_t normalized_color_mask, const Shader& vertex_shader,
+-                                     bool depth_stencil_overwrite_candidate) {
++                                     uint32_t overwrite_candidate_rts) {
+   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
+-                                 normalized_color_mask, vertex_shader,
+-                                 depth_stencil_overwrite_candidate)) {
++                                 normalized_color_mask, vertex_shader, overwrite_candidate_rts)) {
+     return false;
+   }
+ 

@@ -1,0 +1,288 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4029,26 +4029,31 @@
+                              shader_32bit_index_dma, 0, viewport_info, used_texture_mask,
+                              normalized_depth_control, normalized_color_mask);
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-  {
++  if (::rcomp::xenos::RenderDiagnostics().InWindow(GetCurrentFrame())) {
+     using namespace ::rcomp::xenos;
+     draw_util::Scissor diag_scissor;
+     draw_util::GetScissor(regs, diag_scissor);
+     RenderDiagnosticKey key;
+-    const uint32_t indices[] = {0x2000, 0x2001, 0x2002, 0x2006, 0x2080, 0x2081, 0x2082,
++    const uint32_t indices[] = {0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2080, 0x2081, 0x2082,
+         0x200E, 0x200F, 0x2104, 0x2204, 0x2205, 0x2206, 0x210F, 0x2110,
+         0x2111, 0x2112, 0x2113, 0x2114, 0x2200};
+     for (uint32_t index : indices) key.Add(regs[index]);
+-    key.Add64(vertex_shader->ucode_data_hash());
+-    key.Add64(pixel_shader ? pixel_shader->ucode_data_hash() : 0);
++    // Group structural state, not individual shaders or DMA packet addresses.
++    // Hashes/modifications in the log identify the first representative only.
++    key.Add(vertex_shader_modification.vertex.user_clip_plane_count);
++    key.Add(vertex_shader_modification.vertex.user_clip_plane_cull);
++    key.Add(vertex_shader_modification.vertex.vertex_kill_and);
++    key.Add(unsigned(vertex_shader_modification.vertex.host_vertex_shader_type));
++    key.Add(unsigned(pixel_shader_modification.pixel.depth_stencil_mode));
++    key.Add(unsigned(pixel_shader && pixel_shader->writes_depth()));
++    key.Add(unsigned(pixel_shader && pixel_shader->implicit_early_z_write_allowed()));
+     for (uint32_t i = 0; i < 3; ++i) {
+       key.AddFloat(viewport_info.ndc_scale[i]); key.AddFloat(viewport_info.ndc_offset[i]);
+     }
+-    for (const auto& plane : system_constants_.user_clip_planes)
+-      for (float component : plane) key.AddFloat(component);
++    for (uint32_t plane = 0; plane < vertex_shader_modification.vertex.user_clip_plane_count; ++plane)
++      for (float component : system_constants_.user_clip_planes[plane]) key.AddFloat(component);
+     key.Add(normalized_color_mask);
+     key.Add(normalized_depth_control.value);
+-    key.Add64(vertex_shader_modification.value);
+-    key.Add64(pixel_shader_modification.value);
+     key.Add(render_target_cache_->last_update_render_pass_key().key);
+     key.AddFloat(viewport_info.z_min); key.AddFloat(viewport_info.z_max);
+     key.Add(viewport_info.xy_offset[0]); key.Add(viewport_info.xy_offset[1]);
+@@ -4062,7 +4067,7 @@
+     key.Add(regs[XE_GPU_REG_RB_STENCILREFMASK]);
+     key.Add(regs[XE_GPU_REG_RB_STENCILREFMASK_BF]);
+     if (RenderDiagnostics().Accept(RenderDiagnosticKind::Draw, GetCurrentFrame(), key)) {
+-      fprintf(stderr, "RCOMP-RENDER-DRAW frame=%llu sub=%llu path=%u prim=%u vs=%016llX ps=%016llX surf=%08X color0=%08X depth=%08X depthctl=%08X normdepth=%08X colmask=%08X normcolor=%08X clip=%08X vte=%08X mode=%08X window=%08X win_sc=%08X,%08X screen_sc=%08X,%08X viewport=%u,%u+%u,%u z=%.9g,%.9g ndcs=%.9g,%.9g,%.9g ndco=%.9g,%.9g,%.9g scissor=%u,%u+%u,%u scale=%u,%u\n",
++      fprintf(stderr, "RCOMP-RENDER-DRAW frame=%llu sub=%llu structural=1 path=%u prim=%u vs=%016llX ps=%016llX surf=%08X color0=%08X depth=%08X depthctl=%08X normdepth=%08X colmask=%08X normcolor=%08X clip=%08X vte=%08X mode=%08X window=%08X win_sc=%08X,%08X screen_sc=%08X,%08X viewport=%u,%u+%u,%u z=%.9g,%.9g ndcs=%.9g,%.9g,%.9g ndco=%.9g,%.9g,%.9g scissor=%u,%u+%u,%u scale=%u,%u\n",
+           (unsigned long long)GetCurrentFrame(), (unsigned long long)GetCurrentSubmission(),
+           unsigned(render_target_cache_->GetPath()), unsigned(prim_type),
+           (unsigned long long)vertex_shader->ucode_data_hash(),
+@@ -4105,7 +4110,7 @@
+           regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE], regs[XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET],
+           regs[XE_GPU_REG_RB_COLORCONTROL], regs[XE_GPU_REG_RB_DEPTH_CLEAR],
+           regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_RB_STENCILREFMASK_BF]);
+-      for (uint32_t plane = 0; plane < 6; ++plane) {
++      for (uint32_t plane = 0; plane < vertex_shader_modification.vertex.user_clip_plane_count; ++plane) {
+         const float* v = system_constants_.user_clip_planes[plane];
+         fprintf(stderr, "RCOMP-RENDER-PLANE frame=%llu vs=%016llX plane=%u value=%.9g,%.9g,%.9g,%.9g\n",
+             (unsigned long long)GetCurrentFrame(), (unsigned long long)vertex_shader->ucode_data_hash(),
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1164,7 +1164,7 @@
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+ 
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-  {
++  if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+     using namespace ::rcomp::xenos;
+     uint32_t base, row_length, rows, pitch;
+     resolve_info.GetCopyEdramTileSpan(base, row_length, rows, pitch);
+@@ -1321,6 +1321,31 @@
+                 sizeof(copy_shader_constants), &copy_shader_constants);
+           }
+           command_processor_.SubmitBarriers(true);
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++          if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++            using namespace ::rcomp::xenos;
++            if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++              RenderDiagnosticKey key;
++              key.Add(resolve_info.copy_dest_base); key.Add(resolve_info.copy_dest_extent_start);
++              key.Add(resolve_info.copy_dest_extent_length); key.Add(unsigned(copy_shader));
++              key.Add(direct_resolved); key.Add(copy_group_count_x); key.Add(copy_group_count_y);
++              key.Add(copy_shader_constants.dest_relative.edram_info.packed);
++              key.Add(copy_shader_constants.dest_relative.coordinate_info.packed);
++              key.Add(copy_shader_constants.dest_relative.dest_info.value);
++              key.Add(copy_shader_constants.dest_relative.dest_coordinate_info.packed);
++              key.Add(copy_shader_constants.dest_base);
++              if (RenderDiagnostics().Accept(RenderDiagnosticKind::ResolveCopy, command_processor_.GetCurrentFrame(), key))
++                fprintf(stderr, "RCOMP-RENDER-RESOLVE-COPY frame=%llu sub=%llu dest=%08X extent=%08X+%08X shader=%u direct_edram=%u groups=%u,%u constants=%08X,%08X,%08X,%08X,%08X descriptor=%llu+%llu use=%llu+%llu scaled=%u\n",
++                    (unsigned long long)command_processor_.GetCurrentFrame(),
++                    (unsigned long long)command_processor_.GetCurrentSubmission(), key.words[0], key.words[1], key.words[2],
++                    unsigned(copy_shader), unsigned(direct_resolved), copy_group_count_x, copy_group_count_y,
++                    key.words[7], key.words[8], key.words[9], key.words[10], key.words[11],
++                    (unsigned long long)copy_dest_base, (unsigned long long)copy_dest_range_length,
++                    (unsigned long long)copy_dest_use_start, (unsigned long long)copy_dest_use_length,
++                    unsigned(draw_resolution_scaled));
++            }
++          }
++#endif
+           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
+ 
+           // Invalidate textures and mark the range as scaled if needed.
+@@ -1504,7 +1529,7 @@
+                   sizeof(last_update_framebuffer_attachments_));
+       last_update_framebuffer_ = framebuffer;
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-      {
++      if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+         using namespace ::rcomp::xenos;
+         RenderDiagnosticKey key;
+         key.Add(framebuffer->host_extent.width); key.Add(framebuffer->host_extent.height);
+@@ -4707,6 +4732,27 @@
+             host_depth_store_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+             uint32_t(offsetof(HostDepthStoreConstants, rectangle)),
+             sizeof(host_depth_store_rectangle_constant), &host_depth_store_rectangle_constant);
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++        if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++          using namespace ::rcomp::xenos;
++          if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++            const auto& rect = transfer_rectangles[j];
++            RenderDiagnosticKey key;
++            key.Add(dest_rt_key.key); key.Add(transfer.source ? transfer.source->key().key : 0);
++            key.Add(host_depth_store_rectangle_constant.constant);
++            key.Add(rect.x_pixels); key.Add(rect.y_pixels); key.Add(rect.width_pixels); key.Add(rect.height_pixels);
++            key.Add(group_count_x); key.Add(group_count_y); key.Add(msaa_2x_attachments_supported_);
++            if (RenderDiagnostics().Accept(RenderDiagnosticKind::HostDepthStore, command_processor_.GetCurrentFrame(), key))
++              fprintf(stderr, "RCOMP-RENDER-HOST-DEPTH-STORE frame=%llu sub=%llu rt=%08X owner=%08X rect=%u,%u+%u,%u rectangle_constant=%08X groups=%u,%u native2x=%u pitch=%u scale=%u,%u\n",
++                  (unsigned long long)command_processor_.GetCurrentFrame(),
++                  (unsigned long long)command_processor_.GetCurrentSubmission(), key.words[0], key.words[1],
++                  rect.x_pixels, rect.y_pixels, rect.width_pixels, rect.height_pixels,
++                  host_depth_store_rectangle_constant.constant, group_count_x, group_count_y,
++                  unsigned(msaa_2x_attachments_supported_), dest_rt_key.pitch_tiles_at_32bpp,
++                  draw_resolution_scale_x(), draw_resolution_scale_y());
++          }
++        }
++#endif
+         command_processor_.SubmitBarriers(true);
+         command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
+         MarkEdramBufferModified();
+@@ -5054,6 +5100,23 @@
+                 stencil_clear_rectangle.height_pixels * draw_resolution_scale_y();
+             stencil_clear_rect_write_ptr->baseArrayLayer = 0;
+             stencil_clear_rect_write_ptr->layerCount = 1;
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++            if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++              using namespace ::rcomp::xenos;
++              if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++                const auto& rect = stencil_clear_rect_write_ptr->rect;
++                RenderDiagnosticKey key;
++                key.Add(dest_rt_key.key); key.Add(transfer.source ? transfer.source->key().key : 0);
++                key.Add(rect.offset.x); key.Add(rect.offset.y); key.Add(rect.extent.width); key.Add(rect.extent.height);
++                if (RenderDiagnostics().Accept(RenderDiagnosticKind::StencilClear, command_processor_.GetCurrentFrame(), key))
++                  fprintf(stderr, "RCOMP-RENDER-STENCIL-CLEAR frame=%llu sub=%llu rt=%08X source=%08X rect=%d,%d+%u,%u value=0 export=%u\n",
++                      (unsigned long long)command_processor_.GetCurrentFrame(),
++                      (unsigned long long)command_processor_.GetCurrentSubmission(), key.words[0], key.words[1],
++                      rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height,
++                      unsigned(vulkan_device->extensions().ext_EXT_shader_stencil_export));
++              }
++            }
++#endif
+             ++stencil_clear_rect_write_ptr;
+           }
+         }
+@@ -5140,17 +5203,22 @@
+           for (uint32_t j = 0; j < transfer_invocation_rectangle_count; ++j) {
+             const Transfer::Rectangle& transfer_rectangle = transfer_invocation_rectangles[j];
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-            {
++            if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+               using namespace ::rcomp::xenos;
+               RenderDiagnosticKey key;
+               key.Add(dest_rt_key.key);
+               key.Add(it_merged->transfer.source ? it_merged->transfer.source->key().key : 0);
++              key.Add(it_merged->shader_key.key);
++              key.Add(it_merged->transfer.host_depth_source ? it_merged->transfer.host_depth_source->key().key : 0);
++              key.Add(msaa_2x_attachments_supported_);
+               key.Add(transfer_rectangle.x_pixels); key.Add(transfer_rectangle.y_pixels);
+               key.Add(transfer_rectangle.width_pixels); key.Add(transfer_rectangle.height_pixels);
+               if (RenderDiagnostics().Accept(RenderDiagnosticKind::Transfer, command_processor_.GetCurrentFrame(), key))
+-                fprintf(stderr, "RCOMP-RENDER-TRANSFER frame=%llu sub=%llu dest=%08X source=%08X rect=%u,%u+%u,%u\n",
++                fprintf(stderr, "RCOMP-RENDER-TRANSFER frame=%llu sub=%llu prepared=1 dest=%08X source=%08X shader=%08X mode=%u host_depth=%08X host_copy=%u native2x=%u rect=%u,%u+%u,%u\n",
+                     (unsigned long long)command_processor_.GetCurrentFrame(),
+                     (unsigned long long)command_processor_.GetCurrentSubmission(), key.words[0], key.words[1],
++                    it_merged->shader_key.key, unsigned(it_merged->shader_key.mode), key.words[3],
++                    unsigned(it_merged->transfer.host_depth_source == dest_rt), unsigned(msaa_2x_attachments_supported_),
+                     transfer_rectangle.x_pixels, transfer_rectangle.y_pixels,
+                     transfer_rectangle.width_pixels, transfer_rectangle.height_pixels);
+             }
+@@ -5199,6 +5267,25 @@
+ 
+         const VkPipeline* transfer_pipelines = GetTransferPipelines(
+             TransferPipelineKey(transfer_render_pass_key, transfer_shader_key));
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++        if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++          using namespace ::rcomp::xenos;
++          if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++            RenderDiagnosticKey key;
++            key.Add(dest_rt_key.key); key.Add(source_vulkan_rt.key().key);
++            key.Add(transfer_shader_key.key);
++            key.Add(host_depth_source_vulkan_rt ? host_depth_source_vulkan_rt->key().key : 0);
++            key.Add(transfer_vertex_count); key.Add(transfer_sample_pipeline_count);
++            key.Add(transfer_is_stencil_bit); key.Add(unsigned(transfer_pipelines != nullptr));
++            if (RenderDiagnostics().Accept(RenderDiagnosticKind::TransferDraw, command_processor_.GetCurrentFrame(), key))
++              fprintf(stderr, "RCOMP-RENDER-TRANSFER-DRAW frame=%llu sub=%llu dest=%08X source=%08X shader=%08X host_depth=%08X vertices=%u sample_pipelines=%u stencil_bits=%u pipeline_available=%u\n",
++                  (unsigned long long)command_processor_.GetCurrentFrame(),
++                  (unsigned long long)command_processor_.GetCurrentSubmission(), key.words[0], key.words[1],
++                  key.words[2], key.words[3], transfer_vertex_count, transfer_sample_pipeline_count,
++                  transfer_is_stencil_bit ? 8 : 0, unsigned(transfer_pipelines != nullptr));
++          }
++        }
++#endif
+         if (!transfer_pipelines) {
+           continue;
+         }
+@@ -5478,6 +5565,29 @@
+           } break;
+         }
+       }
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++      if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++        using namespace ::rcomp::xenos;
++        if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++          uint32_t bits[4];
++          std::memcpy(bits, &resolve_clear_attachment.clearValue, sizeof(bits));
++          RenderDiagnosticKey key;
++          key.Add(dest_rt_key.key); key.Add(resolve_clear_attachment.aspectMask); key.Add64(clear_value);
++          key.Add(resolve_clear_rect.rect.offset.x); key.Add(resolve_clear_rect.rect.offset.y);
++          key.Add(resolve_clear_rect.rect.extent.width); key.Add(resolve_clear_rect.rect.extent.height);
++          for (uint32_t word : bits) key.Add(word);
++          if (RenderDiagnostics().Accept(RenderDiagnosticKind::Clear, command_processor_.GetCurrentFrame(), key))
++            fprintf(stderr, "RCOMP-RENDER-CLEAR frame=%llu sub=%llu rt=%08X aspects=%u guest=%016llX rect=%d,%d+%u,%u vkbits=%08X,%08X,%08X,%08X framebuffer=%u,%u\n",
++                (unsigned long long)command_processor_.GetCurrentFrame(),
++                (unsigned long long)command_processor_.GetCurrentSubmission(), dest_rt_key.key,
++                resolve_clear_attachment.aspectMask, (unsigned long long)clear_value,
++                resolve_clear_rect.rect.offset.x, resolve_clear_rect.rect.offset.y,
++                resolve_clear_rect.rect.extent.width, resolve_clear_rect.rect.extent.height,
++                bits[0], bits[1], bits[2], bits[3], transfer_framebuffer->host_extent.width,
++                transfer_framebuffer->host_extent.height);
++        }
++      }
++#endif
+       command_buffer.CmdVkClearAttachments(1, &resolve_clear_attachment, 1, &resolve_clear_rect);
+     }
+   }
+@@ -6131,7 +6241,7 @@
+       vulkan_rt.SetTemporarySortIndex(rt_sort_index++);
+     }
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-    {
++    if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+       using namespace ::rcomp::xenos;
+       RenderDiagnosticKey key;
+       key.Add(rt_key.key); key.Add(dump_base); key.Add(dump_row_length_used); key.Add(dump_rows); key.Add(dump_pitch);
+@@ -6213,6 +6323,22 @@
+     uint32_t dispatch_count = rectangle.GetDispatches(dump_pitch, dump_row_length_used, dispatches);
+     for (uint32_t i = 0; i < dispatch_count; ++i) {
+       const ResolveCopyDumpRectangle::Dispatch& dispatch = dispatches[i];
++#if RCOMP_XENOS_RENDER_DIAGNOSTICS
++      if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++        using namespace ::rcomp::xenos;
++        if (RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
++          RenderDiagnosticKey key;
++          key.Add(rt_key.key); key.Add(dump_base); key.Add(dispatch.offset);
++          key.Add(dispatch.width_tiles); key.Add(dispatch.height_tiles); key.Add(dump_pitch);
++          if (RenderDiagnostics().Accept(RenderDiagnosticKind::DumpDispatch, command_processor_.GetCurrentFrame(), key))
++            fprintf(stderr, "RCOMP-RENDER-DUMP-DISPATCH frame=%llu sub=%llu rt=%08X dest_first_tile=%u source_base=%u width_tiles=%u height_tiles=%u source_pitch=%u dest_pitch=%u\n",
++                (unsigned long long)command_processor_.GetCurrentFrame(),
++                (unsigned long long)command_processor_.GetCurrentSubmission(), rt_key.key,
++                dump_base + dispatch.offset, rt_key.base_tiles, dispatch.width_tiles, dispatch.height_tiles,
++                rt_key.GetPitchTiles(), dump_pitch);
++        }
++      }
++#endif
+       offsets.dispatch_first_tile = dump_base + dispatch.offset;
+       if (last_offsets != offsets) {
+         last_offsets = offsets;
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -222,7 +222,7 @@
+       last_usage_ = usage;
+     }
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+-    {
++    if (::rcomp::xenos::RenderDiagnostics().InWindow(command_processor_.GetCurrentFrame())) {
+       using namespace ::rcomp::xenos;
+       RenderDiagnosticKey key;
+       key.Add(src_stage_mask); key.Add(dst_stage_mask); key.Add(src_access_mask); key.Add(dst_access_mask);

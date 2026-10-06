@@ -1,0 +1,139 @@
+// R-comp: resolution-scaled texture load written directly to the host image.
+//
+// Same data and addressing as rexglue @c94f5eb's compiled
+// texture_load_{32,64}bpb_scaled compute shaders (derived from Xenia, BSD-3;
+// layout read from their SPIR-V), but each thread stores its blocks into a
+// storage view of the texture instead of a staging buffer that is then copied
+// to the image.
+// With CONVERT_MODE 1 or 2 (32 bits per block only) the words are the depth of a guest 24-bit depth
+// and 8-bit stencil texel and are converted to the float32 bits of the host's R32_SFLOAT texture like
+// rexglue @c94f5eb's compiled texture_load_depth_{unorm,float}_scaled shaders do (1: 24-bit unorm,
+// 2: 20e4 float): the depth textures need no staging buffer and copy either.
+// Build: glslangValidator -V --target-env vulkan1.1 -DBPB_LOG2=2|3 [-DCONVERT_MODE=1|2] (see
+// gpu/xenos/rexglue/rcomp/shaders/build.sh).
+#version 450
+
+#ifndef BPB_LOG2
+#error BPB_LOG2 must be 2 (32 bits per block) or 3 (64 bits per block)
+#endif
+#ifndef CONVERT_MODE
+#define CONVERT_MODE 0
+#endif
+#if CONVERT_MODE != 0 && BPB_LOG2 != 2
+#error CONVERT_MODE needs 32 bits per block
+#endif
+
+layout(local_size_x = 4, local_size_y = 32, local_size_z = 1) in;
+
+// VulkanTextureCache::LoadConstants. host_offset is the first host row here.
+layout(push_constant) uniform LoadConstants {
+  uint is_tiled_3d_endian_scale;
+  uint guest_offset;
+  uint guest_pitch_aligned;
+  uint guest_z_stride_block_rows_aligned;
+  uvec3 size_blocks;
+  uint host_row_offset;
+  uint host_pitch;
+  uint height_texels;
+} pc;
+
+#if BPB_LOG2 == 2
+layout(set = 0, binding = 0, r32ui) uniform writeonly uimage2D dest;
+#else
+layout(set = 0, binding = 0, rg32ui) uniform writeonly uimage2D dest;
+#endif
+layout(set = 1, binding = 0, std430) readonly buffer Source { uvec4 source[]; };
+
+uvec4 EndianSwap32(uvec4 value, uint endian) {
+  if (endian == 1u || endian == 2u) {
+    value = ((value & 0x00FF00FFu) << 8u) | ((value & 0xFF00FF00u) >> 8u);
+  }
+  if (endian == 2u || endian == 3u) {
+    value = (value << 16u) | (value >> 16u);
+  }
+  return value;
+}
+
+#if CONVERT_MODE == 1
+// Guest depth 24 unorm (the stencil byte is dropped) to float32 bits: (d + (d >> 23)) / 2^24.
+uint ConvertWord(uint word) {
+  uint depth = word >> 8u;
+  depth += depth >> 23u;
+  return floatBitsToUint(float(depth) * 5.96046448e-08);
+}
+#elif CONVERT_MODE == 2
+// Guest depth 20e4 float (4-bit exponent, 20-bit mantissa; the stencil byte is dropped) to float32 bits.
+uint ConvertWord(uint word) {
+  uint depth = word >> 8u;
+  uint mantissa = depth & 0xFFFFFu;
+  uint exponent = depth >> 20u;
+  bool denormal = exponent == 0u;
+  int msb = findMSB(mantissa);
+  uint exponent_value = denormal ? uint(msb) + 4294967277u : exponent;  // msb - 19 for a denormal
+  uint mantissa_value = denormal ? ((mantissa << (20u - uint(msb))) & 0xFFFFFu) : mantissa;
+  uint bits = ((exponent_value + 112u) << 23u) | (mantissa_value << 3u);
+  return depth == 0u ? 0u : bits;
+}
+#else
+uint ConvertWord(uint word) { return word; }
+#endif
+
+// Xenia's classic 2D tiled offset (the form rexglue @c94f5eb's compiled
+// texture_load_*_scaled shaders use); pitch is in blocks, aligned to 32.
+int TiledOffset2D(ivec2 p, uint pitch, uint bpb_log2) {
+  int macro = ((p.x >> 5) + (p.y >> 5) * int(pitch >> 5)) << (bpb_log2 + 7u);
+  int micro = ((p.x & 7) + ((p.y & 0xE) << 2)) << bpb_log2;
+  int offset = macro + ((micro & ~0xF) << 1) + (micro & 0xF) + ((p.y & 1) << 4);
+  return ((offset & ~0x1FF) << 3) + ((p.y & 16) << 7) + ((offset & 0x1C0) << 2) +
+         (((((p.y & 8) >> 2) + (p.x >> 3)) & 3) << 6) + (offset & 0x3F);
+}
+
+// rexglue's resolution-scaled layout: each guest 16-byte unit at tiled offset
+// a holds scale.x * scale.y host 16-byte units at a * scale.x * scale.y,
+// column-major by host sub-position, each of 16 >> bpb_log2 host blocks in a row.
+uint SourceAddress(uvec2 host_block, uvec2 scale, uint bpb_log2) {
+  const uint unit_log2 = 4u - bpb_log2;
+  uvec2 host_unit = uvec2(host_block.x >> unit_log2, host_block.y);
+  uvec2 guest_unit = host_unit / scale;
+  uvec2 sub = host_unit - guest_unit * scale;
+  uint tiled = uint(TiledOffset2D(ivec2(int(guest_unit.x << unit_log2), int(guest_unit.y)),
+                                  pc.guest_pitch_aligned, bpb_log2));
+  uint in_unit = (((sub.x * scale.y + sub.y) << unit_log2) +
+                  (host_block.x & ((1u << unit_log2) - 1u))) << bpb_log2;
+  return tiled * (scale.x * scale.y) + in_unit + pc.guest_offset;
+}
+
+void main() {
+  // 32 bits per block: 8 blocks per thread; 64 bits per block: 4.
+  const uint blocks_log2 = 5u - BPB_LOG2;
+  uvec2 block = gl_GlobalInvocationID.xy << uvec2(blocks_log2, 0u);
+  if (any(greaterThanEqual(block, pc.size_blocks.xy))) {
+    return;
+  }
+  uint endian = (pc.is_tiled_3d_endian_scale >> 2u) & 3u;
+  uvec2 scale = (uvec2(pc.is_tiled_3d_endian_scale) >> uvec2(4u, 7u)) & 7u;
+  ivec2 row = ivec2(0, int(block.y + pc.host_row_offset));
+  for (uint half_index = 0u; half_index < 2u; ++half_index) {
+    uvec2 chunk = uvec2(block.x + half_index * (16u >> BPB_LOG2), block.y);
+    if (chunk.x >= pc.size_blocks.x) {
+      break;
+    }
+    uint address = SourceAddress(chunk, scale, BPB_LOG2);
+    uvec4 words = EndianSwap32(source[address >> 4u], endian);
+#if BPB_LOG2 == 2
+    for (uint i = 0u; i < 4u; ++i) {
+      uint x = block.x + half_index * 4u + i;
+      if (x < pc.size_blocks.x) {
+        imageStore(dest, ivec2(int(x), row.y), uvec4(ConvertWord(words[i]), 0u, 0u, 0u));
+      }
+    }
+#else
+    for (uint i = 0u; i < 2u; ++i) {
+      uint x = block.x + half_index * 2u + i;
+      if (x < pc.size_blocks.x) {
+        imageStore(dest, ivec2(int(x), row.y), uvec4(words[i * 2u], words[i * 2u + 1u], 0u, 0u));
+      }
+    }
+#endif
+  }
+}

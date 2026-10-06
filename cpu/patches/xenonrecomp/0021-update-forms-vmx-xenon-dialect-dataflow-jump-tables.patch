@@ -1,0 +1,1299 @@
+--- a/XenonAnalyse/main.cpp
++++ b/XenonAnalyse/main.cpp
+@@ -1,6 +1,11 @@
+ #include <algorithm>
+ #include <cassert>
++#include <climits>
++#include <cstddef>
++#include <cstdint>
+ #include <iterator>
++#include <unordered_set>
++#include <byteswap.h>
+ #include <file.h>
+ #include <disasm.h>
+ #include <image.h>
+@@ -20,6 +25,7 @@
+     size_t defaultLabel{};
+     uint32_t r{};
+     uint32_t type{};
++    bool byTarget{};  // R-comp patch 0021: dispatch on the CTR target (TOML target = "ctr")
+ };
+ 
+ void ReadTable(Image& image, SwitchTable& table)
+@@ -210,6 +216,462 @@
+     return nullptr;
+ }
+ 
++// ---- R-comp patch 0021: jump tables found by data flow ------------------------
++// The four instruction patterns below only match one schedule of each table
++// form. Other compilers interleave the same instructions differently (lis,
++// rlwinm, addi, lwzx) or pad them with nops, and those tables were not found:
++// their bctr became an indirect call and the code after the inline table was cut
++// from the function. This recogniser starts from each bctr no pattern claimed and
++// follows the registers back through its straight-line run instead.
++namespace dataflow
++{
++constexpr uint32_t kBctr = 0x4E800420;
++constexpr uint32_t kBlr = 0x4E800020;
++
++inline uint32_t Op(uint32_t w) { return w >> 26; }
++inline uint32_t Rt(uint32_t w) { return (w >> 21) & 31; }
++inline uint32_t Ra(uint32_t w) { return (w >> 16) & 31; }
++inline uint32_t Rb(uint32_t w) { return (w >> 11) & 31; }
++inline uint32_t Xo(uint32_t w) { return (w >> 1) & 0x3FF; }
++inline int32_t Simm(uint32_t w) { return int16_t(w & 0xFFFF); }
++
++// A branch, sc or a zero word ends a straight-line run.
++inline bool EndsRun(uint32_t w)
++{
++    const uint32_t op = Op(w);
++    return w == 0 || op == 16 || op == 17 || op == 18 || (op == 19 && (Xo(w) == 16 || Xo(w) == 528));
++}
++
++inline bool IsMtctr(uint32_t w) { return (w & 0xFC1FFFFF) == 0x7C0903A6; }
++
++// GPRs `w` may write. Every bit when the form is not known, so a caller that
++// asks "is this register still intact" stays conservative.
++uint32_t GprWrites(uint32_t w)
++{
++    const uint32_t op = Op(w), rt = 1u << Rt(w), ra = 1u << Ra(w);
++    if (w == 0x60000000)
++        return 0;  // nop (ori r0,r0,0) leaves r0 unchanged; schedulers pad tables with it
++    switch (op)
++    {
++    case 7: case 8: case 12: case 13: case 14: case 15:  // mulli subfic addic addic. addi addis
++    case 32: case 34: case 40: case 42:                  // lwz lbz lhz lha
++        return rt;
++    case 58:                                             // ld ldu lwa
++        return (w & 3) == 1 ? rt | ra : rt;
++    case 33: case 35: case 41: case 43:                  // lwzu lbzu lhzu lhau
++        return rt | ra;
++    case 46:                                             // lmw rT..r31
++        return ~0u << Rt(w);
++    case 20: case 21: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30:
++        return ra;                                       // rotates, logical immediates
++    case 36: case 38: case 44: case 47: case 48: case 50: case 52: case 54:
++        return 0;                                        // stw stb sth stmw lfs lfd stfs stfd
++    case 37: case 39: case 45: case 49: case 51: case 53: case 55:
++        return ra;                                       // update stores, update FP accesses
++    case 62:
++        return (w & 3) == 1 ? ra : 0;                    // std stdu
++    case 2: case 3: case 4: case 5: case 6: case 10: case 11: case 59: case 63:
++        return 0;                                        // traps, compares, VMX, FP
++    case 16: case 18:
++        return 0;                                        // branches (a call's clobbers are the caller's concern)
++    case 19:
++        return 0;                                        // CR logic, isync, bclr, bcctr
++    case 31:
++        switch (Xo(w))
++        {
++        case 0: case 32: case 4: case 68: case 54: case 86: case 246: case 278: case 470: case 982: case 1014:
++        case 598: case 854: case 467: case 144: case 146: case 178:
++        case 135: case 149: case 150: case 151: case 167: case 199: case 214: case 215: case 231: case 407:
++        case 487: case 647: case 662: case 663: case 679: case 727: case 903: case 918: case 935: case 983:
++        case 6: case 7: case 38: case 39: case 71: case 103: case 359: case 519: case 551: case 775: case 807:
++            return 0;                                    // compares, cache ops, stores, VMX loads, mtspr
++        case 181: case 183: case 247: case 439: case 567: case 631: case 695: case 759:
++            return ra;                                   // update stores, update FP loads
++        case 53: case 55: case 119: case 311: case 373: case 375:
++            return rt | ra;                              // update loads
++        case 24: case 26: case 27: case 28: case 58: case 60: case 122: case 124: case 284: case 316:
++        case 412: case 444: case 476: case 536: case 539: case 792: case 794: case 824: case 826: case 827:
++        case 922: case 954: case 986:
++            return ra;                                   // logical, shifts, counts, extends (rA)
++        default:
++            return rt;                                   // loads, arithmetic, mf*: rT
++        }
++    default:
++        return ~0u;
++    }
++}
++
++// CR fields (bit f = crf) `w` may write. Every bit when the form is not known.
++uint32_t CrWrites(uint32_t w)
++{
++    const uint32_t op = Op(w);
++    switch (op)
++    {
++    case 10: case 11:
++        return 1u << (Rt(w) >> 2);
++    case 13: case 28: case 29:
++        return 1;                                        // addic. andi. andis.
++    case 20: case 21: case 23: case 30:
++        return (w & 1) ? 1 : 0;
++    case 31:
++    {
++        const uint32_t xo = Xo(w);
++        if (xo == 0 || xo == 32 || xo == 512)
++            return 1u << (Rt(w) >> 2);                   // cmp cmpl mcrxr
++        if (xo == 144)
++        {
++            uint32_t mask = 0;
++            for (uint32_t f = 0; f < 8; f++)
++                if ((w >> 12) & (0x80u >> f))
++                    mask |= 1u << f;
++            return mask;                                 // mtcrf
++        }
++        return (w & 1) ? 1 : 0;                          // record forms, stwcx. stdcx.
++    }
++    case 19:
++        if (Xo(w) == 16 || Xo(w) == 528 || Xo(w) == 150)
++            return 0;
++        return 1u << (Rt(w) >> 2);                       // CR logic, mcrf
++    case 59:
++        return (w & 1) ? 2 : 0;
++    case 63:
++    {
++        const uint32_t xo = Xo(w);
++        if (xo == 0 || xo == 32 || xo == 64)
++            return 1u << (Rt(w) >> 2);                   // fcmpu fcmpo mcrfs
++        return (w & 1) ? 2 : 0;
++    }
++    case 4:
++        switch (w & 0x3FF)
++        {
++        case 6: case 70: case 134: case 198: case 454: case 518: case 582: case 646: case 710:
++        case 774: case 838: case 902: case 966:
++            return (w & 0x400) ? 1u << 6 : 0;            // vcmp*. (VC form)
++        default:
++            return 0;
++        }
++    case 6:
++        return (w & 0x40) ? 1u << 6 : 0;                 // VMX128 compares with record bit (and a few others)
++    case 2: case 3: case 5: case 7: case 8: case 12: case 14: case 15: case 16: case 17: case 18:
++    case 24: case 25: case 26: case 27: case 62:
++        return 0;
++    default:
++        return (op >= 32 && op <= 58) ? 0 : ~0u;         // loads and stores
++    }
++}
++
++struct Run
++{
++    const uint32_t* words{};  // big-endian words of the section
++    size_t base{};            // address of words[0]
++    size_t begin{};           // first index of the straight-line run ending at the bctr
++    size_t bctr{};            // index of the bctr
++
++    uint32_t At(size_t i) const { return ByteSwap(words[i]); }
++    size_t Address(size_t i) const { return base + 4 * i; }
++
++    // Index of the last instruction before `before` that may write GPR `reg`, or -1.
++    ptrdiff_t Def(size_t before, uint32_t reg) const
++    {
++        for (size_t i = before; i-- > begin;)
++            if (GprWrites(At(i)) & (1u << reg))
++                return ptrdiff_t(i);
++        return -1;
++    }
++
++    // Value of `reg` before `before` when it is built from lis/addi/addis/ori
++    // constants only.
++    bool Constant(size_t before, uint32_t reg, uint32_t& value, int depth = 0) const
++    {
++        const ptrdiff_t d = Def(before, reg);
++        if (d < 0 || depth > 4)
++            return false;
++        const uint32_t w = At(size_t(d));
++        uint32_t source = 0;
++        switch (Op(w))
++        {
++        case 14:  // addi / li
++        case 15:  // addis / lis
++        {
++            if (Rt(w) != reg)
++                return false;
++            const uint32_t imm = Op(w) == 14 ? uint32_t(Simm(w)) : uint32_t(Simm(w)) << 16;
++            if (Ra(w) == 0)
++            {
++                value = imm;
++                return true;
++            }
++            if (!Constant(size_t(d), Ra(w), source, depth + 1))
++                return false;
++            value = source + imm;
++            return true;
++        }
++        case 24:  // ori
++            if (Ra(w) != reg || !Constant(size_t(d), Rt(w), source, depth + 1))
++                return false;
++            value = source | (w & 0xFFFF);
++            return true;
++        default:
++            return false;
++        }
++    }
++};
++
++// rlwinm rA, rS, sh, 0, 31 - sh (slwi): returns rS.
++inline bool IsShiftLeft(uint32_t w, uint32_t reg, uint32_t sh, uint32_t& source)
++{
++    if (Op(w) != 21 || Ra(w) != reg || (w & 1) || Rb(w) != sh || ((w >> 6) & 31) != 0 || ((w >> 1) & 31) != 31 - sh)
++        return false;
++    source = Rt(w);
++    return true;
++}
++
++// lbzx / lhzx / lwzx rT, rA, rB (no record bit): 87 / 279 / 23.
++inline bool IsIndexedLoad(uint32_t w, uint32_t xo, uint32_t reg)
++{
++    return Op(w) == 31 && Xo(w) == xo && !(w & 1) && Rt(w) == reg && Ra(w) != 0;
++}
++
++struct Recognised
++{
++    bool shaped{};          // a jump-table data flow ends in this bctr
++    uint32_t type{};        // SWITCH_*
++    uint32_t index{};       // index register
++    size_t use{};           // run index of the first instruction reading the index
++    uint32_t table{};       // address of the table data
++    uint32_t codeBase{};    // computed / offset forms: the address offsets are added to
++    uint32_t shift{};       // computed form: offset scale
++};
++
++Recognised Recognise(const Run& run)
++{
++    Recognised out{};
++    ptrdiff_t mt = -1;
++    for (size_t i = run.bctr; i-- > run.begin;)
++        if (IsMtctr(run.At(i)))
++        {
++            mt = ptrdiff_t(i);
++            break;
++        }
++    if (mt < 0)
++        return out;
++    const uint32_t target = Rt(run.At(size_t(mt)));
++    const ptrdiff_t d = run.Def(size_t(mt), target);
++    if (d < 0)
++        return out;
++    const uint32_t w = run.At(size_t(d));
++    if (Op(w) != 31 || (w & 1) || Rt(w) != target)
++        return out;
++    const uint32_t a = Ra(w), b = Rb(w);
++    if (Xo(w) == 23 && a != 0)  // lwzx: absolute table
++    {
++        for (int order = 0; order < 2 && !out.shaped; order++)
++        {
++            const uint32_t base = order ? b : a, scaled = order ? a : b;
++            uint32_t table = 0, index = 0;
++            const ptrdiff_t s = run.Def(size_t(d), scaled);
++            if (!run.Constant(size_t(d), base, table) || s < 0 || !IsShiftLeft(run.At(size_t(s)), scaled, 2, index))
++                continue;
++            out = { true, SWITCH_ABSOLUTE, index, size_t(s), table, 0, 0 };
++        }
++        return out;
++    }
++    if (Xo(w) != 266 || (w & 0x400))  // add (no OE)
++        return out;
++    for (int order = 0; order < 2 && !out.shaped; order++)
++    {
++        const uint32_t base = order ? b : a, offset = order ? a : b;
++        uint32_t codeBase = 0;
++        const ptrdiff_t o = run.Def(size_t(d), offset);
++        if (!run.Constant(size_t(d), base, codeBase) || o < 0)
++            continue;
++        uint32_t ow = run.At(size_t(o)), shift = 0, loaded = offset;
++        ptrdiff_t load = o;
++        for (uint32_t sh = 1; sh <= 4; sh++)
++        {
++            uint32_t source = 0;
++            if (IsShiftLeft(ow, offset, sh, source))
++            {
++                shift = sh;
++                loaded = source;
++                load = run.Def(size_t(o), source);
++                if (load < 0)
++                    break;
++                ow = run.At(size_t(load));
++                break;
++            }
++        }
++        if (load < 0)
++            continue;
++        const bool bytes = IsIndexedLoad(ow, 87, loaded), halves = !shift && IsIndexedLoad(ow, 279, loaded);
++        if (!bytes && !halves)
++            continue;
++        for (int inner = 0; inner < 2 && !out.shaped; inner++)
++        {
++            const uint32_t tableReg = inner ? Rb(ow) : Ra(ow), indexReg = inner ? Ra(ow) : Rb(ow);
++            uint32_t table = 0;
++            // rA = 0 reads as the value 0, not r0: only rB may name r0.
++            if ((inner ? indexReg : tableReg) == 0 || !run.Constant(size_t(load), tableReg, table))
++                continue;
++            if (bytes)
++            {
++                out = { true, uint32_t(shift ? SWITCH_COMPUTED : SWITCH_BYTEOFFSET), indexReg, size_t(load), table, codeBase, shift };
++            }
++            else
++            {
++                uint32_t index = 0;
++                const ptrdiff_t s = run.Def(size_t(load), indexReg);
++                if (s < 0 || !IsShiftLeft(run.At(size_t(s)), indexReg, 1, index))
++                    continue;
++                out = { true, SWITCH_SHORTOFFSET, index, size_t(s), table, codeBase, 0 };
++            }
++        }
++    }
++    return out;
++}
++
++struct Guard
++{
++    bool found{};
++    uint32_t count{};
++    size_t defaultLabel{};
++};
++
++// The bound of `index`, searched backwards from the bctr: the nearest bgt/ble
++// (or bgtlr/blelr) on the gt bit of a field, or bge/blt (bgelr/bltlr) on its lt
++// bit, then the nearest write of that field, which must be `cmplwi crX, reg, N`
++// with `reg` holding the index: the index register itself, or the register it
++// was copied from (`mr index, reg`, the last write of the index before its
++// use). The search stops where that value may change (a write, or a call when
++// it is in a volatile register), at the end of the code that falls into the
++// table (blr, bctr, an unconditional branch other than one the preceding
++// conditional branch jumps over, sc, a zero word), and after 1,024
++// instructions. `useIndex` is the first instruction that reads the index;
++// writes after it do not stop the search.
++Guard FindGuard(const uint32_t* words, size_t sectionBase, size_t bctrIndex, uint32_t index, size_t useIndex)
++{
++    Guard out{};
++    auto ends = [](uint32_t w)
++        {
++            const uint32_t op = Op(w);
++            return w == 0 || w == kBlr || w == kBctr || op == 17 || (op == 18 && !(w & 1));
++        };
++    auto writes = [&](size_t k, uint32_t reg) { return (GprWrites(ByteSwap(words[k])) & (1u << reg)) != 0; };
++    // Between the first read of the index and the bctr the register may be reused:
++    // a compare there only bounds the index before its first write after the use.
++    size_t firstWrite = bctrIndex;
++    for (size_t k = useIndex; k < bctrIndex && firstWrite == bctrIndex; k++)
++        if (writes(k, index))
++            firstWrite = k;
++    // The last write of the index before its use, when it is `mr index, source`.
++    size_t copyAt = SIZE_MAX;
++    uint32_t source = index;
++    for (size_t k = useIndex; k-- > 0 && useIndex - k <= 1024;)
++    {
++        const uint32_t w = ByteSwap(words[k]);
++        if (ends(w))
++            break;
++        if (writes(k, index))
++        {
++            if (Op(w) == 31 && Xo(w) == 444 && !(w & 1) && Ra(w) == index && Rt(w) == Rb(w) && Rt(w) != index)
++            {
++                copyAt = k;
++                source = Rt(w);
++            }
++            break;
++        }
++    }
++    // After the copy, `source` keeps the index value until its next write.
++    size_t sourceFirstWrite = useIndex;
++    if (copyAt != SIZE_MAX)
++        for (size_t k = copyAt + 1; k < useIndex && sourceFirstWrite == useIndex; k++)
++            if (writes(k, source))
++                sourceFirstWrite = k;
++    int cr = -1;
++    bool exclusive = false;
++    auto isVolatile = [](uint32_t reg) { return reg == 0 || (reg >= 3 && reg <= 12); };
++    for (size_t step = 1; step <= 1024 && step <= bctrIndex; step++)
++    {
++        const size_t i = bctrIndex - step;
++        const size_t at = sectionBase + 4 * i;
++        const uint32_t w = ByteSwap(words[i]);
++        const uint32_t op = Op(w);
++        // The register that holds the index value at this point.
++        const uint32_t holder = copyAt != SIZE_MAX && i < copyAt ? source : index;
++        // `ble crX, L; b default; L:` reaches the code after the `b` through the
++        // conditional branch just before it: keep searching there.
++        const bool skipped = op == 18 && !(w & 3) && i > 0 && cr < 0 && Op(ByteSwap(words[i - 1])) == 16 &&
++            !(ByteSwap(words[i - 1]) & 3) && at - 4 + int32_t(int16_t(ByteSwap(words[i - 1]) & 0xFFFC)) == at + 4;
++        if (skipped)
++            continue;
++        if (ends(w))
++            break;
++        const bool call = (w & 1) && (op == 18 || op == 16 || (op == 19 && (Xo(w) == 16 || Xo(w) == 528)));
++        if (call && isVolatile(holder))
++            break;
++        if (cr < 0)
++        {
++            if ((op == 16 || (op == 19 && Xo(w) == 16)) && !(w & 1))
++            {
++                const uint32_t bo = Rt(w) & 0x1C, bi = Ra(w);
++                // bgt / ble on the gt bit (N + 1 cases), bge / blt on the lt bit (N cases).
++                if (((bi & 3) == 1 || (bi & 3) == 0) && (bo == 12 || bo == 4))
++                {
++                    cr = int(bi >> 2);
++                    exclusive = (bi & 3) == 0;
++                    const bool exits = (bi & 3) == 1 ? bo == 12 : bo == 4;
++                    if (op == 16 && exits && !(w & 2))
++                        out.defaultLabel = at + int32_t(int16_t(w & 0xFFFC));
++                    continue;
++                }
++            }
++        }
++        else if (CrWrites(w) & (1u << cr))
++        {
++            if (op == 10 && (Rt(w) >> 2) == uint32_t(cr) && !(Rt(w) & 1))
++            {
++                const uint32_t reg = Ra(w);
++                const bool onIndex = reg == index && (i >= useIndex ? i < firstWrite : copyAt == SIZE_MAX || i > copyAt);
++                const bool onSource = copyAt != SIZE_MAX && reg == source && i < useIndex &&
++                    (i < copyAt || i < sourceFirstWrite);
++                if (onIndex || onSource)
++                {
++                    out.count = (w & 0xFFFF) + (exclusive ? 0 : 1);
++                    out.found = out.count != 0;
++                }
++            }
++            break;
++        }
++        if (i < useIndex && i != copyAt && writes(i, holder))
++            break;
++    }
++    return out;
++}
++
++// Length of an absolute table emitted right after its bctr when no guard bounds
++// the index (it is bounded by construction). Entries are read while they are
++// aligned addresses after the entries read so far, at most 1 MiB past the table.
++// The table ends as soon as its smallest entry is the address just past it (the
++// first case follows the table; the patch 0015 rule), else at the first word
++// that cannot be an entry, provided no entry points inside the table. MSVC also
++// places code reached otherwise after a table, which the first rule alone missed.
++uint32_t InlineTableLength(const uint32_t* words, size_t available, uint32_t tableAddress)
++{
++    uint32_t lowest = UINT32_MAX;
++    uint32_t n = 0;
++    for (; n < 512 && n < available; n++)
++    {
++        const uint32_t entry = ByteSwap(words[n]);
++        if ((entry & 3) || entry < tableAddress + 4 * (n + 1) || entry - tableAddress > 0x100000)
++            break;
++        lowest = std::min(lowest, entry);
++        if (lowest == tableAddress + 4 * (n + 1))
++            return n + 1;
++    }
++    return n > 0 && lowest >= tableAddress + 4 * n ? n : 0;
++}
++}  // namespace dataflow
++
+ static std::string out;
+ 
+ template<class... Args>
+@@ -236,6 +698,8 @@
+             println("base = 0x{:X}", table.base);
+             println("r = {}", table.r);
+             println("default = 0x{:X}", table.defaultLabel);
++            if (table.byTarget)
++                println("target = \"ctr\"");
+             println("labels = [");
+             for (const auto& label : table.labels)
+             {
+@@ -250,6 +714,71 @@
+ 
+     println("# Generated by XenonAnalyse");
+ 
++    // R-comp patch 0021: the code section holding `address`, or nullptr.
++    auto codeSectionOf = [&](size_t address) -> const Section*
++        {
++            for (const auto& section : image.sections)
++                if ((section.flags & SectionFlags_Code) && address >= section.base && address - section.base < section.size)
++                    return &section;
++            return nullptr;
++        };
++
++    // R-comp patch 0021: the bctr a table at `base` resolves to, as XenonRecomp
++    // resolves it (the first bctr within 64 bytes, in the same block), or 0.
++    auto bctrOf = [&](size_t base) -> size_t
++        {
++            const Section* section = codeSectionOf(base);
++            if (!section || (base & 3))
++                return 0;
++            for (size_t offset = 0; offset < 64 && base + offset + 4 <= section->base + section->size; offset += 4)
++            {
++                const uint32_t w = ByteSwap(*reinterpret_cast<const uint32_t*>(section->data + (base + offset - section->base)));
++                if (w == dataflow::kBctr)
++                    return base + offset;
++                if (dataflow::Op(w) == 16 || dataflow::Op(w) == 18 ||
++                    (dataflow::Op(w) == 19 && (dataflow::Xo(w) == 16 || dataflow::Xo(w) == 528)))
++                    return 0;
++            }
++            return 0;
++        };
++
++    // R-comp patch 0021: a table is only written when every label is an aligned
++    // address in the code section of its bctr; anything else is reported (the
++    // inventory treats the report as a blocker) instead of failing XenonRecomp or
++    // becoming an indirect call that silently leaves the function.
++    std::unordered_set<size_t> claimedBctrs;
++    size_t unresolved = 0;
++    auto reportUnresolved = [&](size_t address, const char* reason)
++        {
++            fmt::println("WARNING: unresolved jump table at {:X}: {}", address, reason);
++            println("# unresolved jump table at 0x{:X}: {}", address, reason);
++            ++unresolved;
++        };
++    auto emitTable = [&](SwitchTable& table) -> bool
++        {
++            const size_t bctr = bctrOf(table.base);
++            const Section* section = codeSectionOf(bctr);
++            if (!bctr || !section)
++            {
++                reportUnresolved(table.base, "no bctr in the same block");
++                return false;
++            }
++            if (claimedBctrs.count(bctr))
++                return false;  // another form already describes this bctr
++            for (const auto label : table.labels)
++            {
++                if ((label & 3) != 0 || label < section->base || label - section->base >= section->size)
++                {
++                    reportUnresolved(table.base, "a label is not an aligned address in the code section of its bctr");
++                    return false;
++                }
++            }
++            claimedBctrs.insert(bctr);
++            printTable(table);
++            switches.emplace_back(table);
++            return true;
++        };
++
+     auto scanPattern = [&](uint32_t* pattern, size_t count, size_t type)
+         {
+             for (const auto& section : image.sections)
+@@ -269,20 +798,26 @@
+ 
+                     if (data != nullptr)
+                     {
++                        // The index register is the source of the rlwinm at +2 (absolute and
++                        // 16-bit offset tables) or the index of the lbzx at +2 (computed and
++                        // byte offset tables).
++                        ppc_insn rl;
++                        ppc::Disassemble((const uint32_t*)data + 2, base + (data - dataStart) + 8, rl);
++                        const uint32_t indexReg = (type == SWITCH_COMPUTED || type == SWITCH_BYTEOFFSET)
++                            ? uint32_t(rl.operands[2]) : uint32_t(rl.operands[1]);
+                         SwitchTable table{};
+                         table.type = type;
+-                        ScanTable((uint32_t*)data, base + (data - dataStart), table);
++                        // R-comp patch 0021: the nearby search follows the hoisted rules too
++                        // (the cmplwi must test the index register, the search stops at a blr
++                        // or a write of that register). Without them a compare of another
++                        // register, or of an older value of this one, possibly in the previous
++                        // function, sized the table and labels were read past its end.
++                        ScanTable((uint32_t*)data, base + (data - dataStart), table, 32, indexReg);
+                         if (table.base == 0)
+                         {
+-                            // Hoisted guard: the index register is the source of the rlwinm at +2
+-                            // (absolute and 16-bit offset tables) or the index of the lbzx at +2
+-                            // (computed and byte offset tables). R-comp patch 0019: the search was
+-                            // only made for absolute tables; the same rules (stop at a blr or at a
+-                            // write of the index register) apply to every form.
+-                            ppc_insn rl;
+-                            ppc::Disassemble((const uint32_t*)data + 2, base + (data - dataStart) + 8, rl);
+-                            const uint32_t indexReg = (type == SWITCH_COMPUTED || type == SWITCH_BYTEOFFSET)
+-                                ? uint32_t(rl.operands[2]) : uint32_t(rl.operands[1]);
++                            // Hoisted guard. R-comp patch 0019: the search was only made for
++                            // absolute tables; the same rules (stop at a blr or at a write of
++                            // the index register) apply to every form.
+                             table = SwitchTable{};
+                             table.type = type;
+                             ScanTable((uint32_t*)data, base + (data - dataStart), table, 1024, indexReg);
+@@ -298,34 +833,26 @@
+                                 ppc::Disassemble((const uint32_t*)data, at, hi);
+                                 ppc::Disassemble((const uint32_t*)data + 1, at + 4, lo);
+                                 const uint32_t tableAddress = (uint32_t(hi.operands[1]) << 16) + int32_t(int16_t(lo.operands[2]));
+-                                const auto* words = (const be<uint32_t>*)image.Find(tableAddress);
+-                                if (words && tableAddress == at + 6 * 4)
++                                const Section* code = codeSectionOf(at);
++                                if (code && tableAddress == at + 6 * 4)
+                                 {
+-                                    uint32_t lowest = UINT32_MAX;
+-                                    for (uint32_t n = 1; n <= 512; n++)
++                                    const uint32_t n = dataflow::InlineTableLength(
++                                        reinterpret_cast<const uint32_t*>(code->data + (tableAddress - code->base)),
++                                        (code->base + code->size - tableAddress) / 4, tableAddress);
++                                    if (n)
+                                     {
+-                                        const uint32_t entry = words[n - 1];
+-                                        if (entry & 3 || entry < tableAddress || entry - tableAddress > 0x100000)
+-                                            break;
+-                                        lowest = std::min(lowest, entry);
+-                                        if (lowest == tableAddress + 4 * n)
+-                                        {
+-                                            table.r = rl.operands[1];
+-                                            table.labels.resize(n);
+-                                            table.base = at;
+-                                            break;
+-                                        }
++                                        table.r = rl.operands[1];
++                                        table.labels.resize(n);
++                                        table.base = at;
+                                     }
+                                 }
+                             }
+                         }
+ 
+-                        // fmt::println("{:X} ; jmptable - {}", base + (data - dataStart), table.labels.size());
+                         if (table.base != 0)
+                         {
+                             ReadTable(image, table);
+-                            printTable(table);
+-                            switches.emplace_back(std::move(table));
++                            emitTable(table);
+                         }
+ 
+                         data += 4;
+@@ -390,6 +917,125 @@
+     scanPattern(offsetSwitch, std::size(offsetSwitch), SWITCH_BYTEOFFSET);
+     scanPattern(wordOffsetSwitch, std::size(wordOffsetSwitch), SWITCH_SHORTOFFSET);
+ 
++    // R-comp patch 0021: every bctr no pattern claimed, by data flow. Its table is
++    // written with the bctr as its base.
++    // A table whose entries all leave the code between the .pdata function starts
++    // around its bctr is an array of function addresses (a call through a function
++    // pointer, often a tail call), not a switch: its bctr stays an indirect call.
++    std::vector<uint32_t> functionStarts;  // sorted .pdata function starts
++    if (const Section* pdata = image.Find(".pdata"))
++    {
++        const auto* entries = reinterpret_cast<const uint32_t*>(pdata->data);
++        for (size_t k = 0; k + 1 < pdata->size / 4; k += 2)
++            if (entries[k])
++                functionStarts.push_back(ByteSwap(entries[k]));
++        std::sort(functionStarts.begin(), functionStarts.end());
++    }
++    auto sameFunctionRegion = [&](size_t bctr, size_t label)
++        {
++            auto next = std::upper_bound(functionStarts.begin(), functionStarts.end(), uint32_t(bctr));
++            const size_t end = next == functionStarts.end() ? SIZE_MAX : *next;
++            const size_t begin = next == functionStarts.begin() ? 0 : *std::prev(next);
++            return label >= begin && label < end;
++        };
++    println("# ---- DATAFLOW JUMPTABLE ----");
++    for (const auto& section : image.sections)
++    {
++        if (!(section.flags & SectionFlags_Code))
++            continue;
++        const auto* words = reinterpret_cast<const uint32_t*>(section.data);
++        const size_t count = section.size / 4;
++        for (size_t i = 0; i < count; i++)
++        {
++            if (ByteSwap(words[i]) != dataflow::kBctr || claimedBctrs.count(section.base + 4 * i))
++                continue;
++            dataflow::Run run{ words, section.base, i, i };
++            while (run.begin > 0 && i - run.begin < 32 && !dataflow::EndsRun(ByteSwap(words[run.begin - 1])))
++                run.begin--;
++            const auto found = dataflow::Recognise(run);
++            if (!found.shaped)
++                continue;
++            const size_t bctrAddress = section.base + 4 * i;
++            // The switch is emitted on the index register at the bctr. When the code
++            // reuses that register before its bctr, the table switches on the target
++            // address in CTR instead.
++            bool intact = true;
++            for (size_t k = found.use; k < i; k++)
++                if (dataflow::GprWrites(ByteSwap(words[k])) & (1u << found.index))
++                    intact = false;
++            SwitchTable table{};
++            table.byTarget = !intact;
++            table.type = found.type;
++            table.base = bctrAddress;
++            table.r = found.index;
++            const auto guard = dataflow::FindGuard(words, section.base, i, found.index, found.use);
++            if (guard.found)
++            {
++                table.labels.resize(guard.count);
++                table.defaultLabel = guard.defaultLabel;
++            }
++            else if (found.type == SWITCH_ABSOLUTE && found.table == bctrAddress + 4)
++            {
++                // No guard: the inline-table rule of the absolute pattern above.
++                table.labels.resize(dataflow::InlineTableLength(words + i + 1, count - i - 1, found.table));
++            }
++            if (table.labels.empty())
++            {
++                // Unbounded: only its first entry is known. A function-address array
++                // keeps the indirect call.
++                if (found.type == SWITCH_ABSOLUTE)
++                {
++                    bool inImage = false;
++                    for (const auto& data : image.sections)
++                        if (found.table >= data.base && found.table - data.base + 4 <= data.size)
++                            inImage = true;
++                    if (inImage && !sameFunctionRegion(bctrAddress,
++                            ByteSwap(*static_cast<const uint32_t*>(image.Find(found.table)))))
++                        continue;
++                }
++                reportUnresolved(bctrAddress, "no bound for the index (no guarding cmplwi and no inline table)");
++                continue;
++            }
++            const size_t width = found.type == SWITCH_ABSOLUTE ? 4 : found.type == SWITCH_SHORTOFFSET ? 2 : 1;
++            bool readable = false;
++            for (const auto& data : image.sections)
++                if (found.table >= data.base && found.table - data.base + width * table.labels.size() <= data.size)
++                    readable = true;
++            if (!readable)
++            {
++                reportUnresolved(bctrAddress, "the table data is outside the image");
++                continue;
++            }
++            const auto* bytes = static_cast<const uint8_t*>(image.Find(found.table));
++            for (size_t n = 0; n < table.labels.size(); n++)
++            {
++                switch (found.type)
++                {
++                case SWITCH_ABSOLUTE:
++                    table.labels[n] = ByteSwap(reinterpret_cast<const uint32_t*>(bytes)[n]);
++                    break;
++                case SWITCH_COMPUTED:
++                    table.labels[n] = found.codeBase + (uint32_t(bytes[n]) << found.shift);
++                    break;
++                case SWITCH_BYTEOFFSET:
++                    table.labels[n] = found.codeBase + bytes[n];
++                    break;
++                default:
++                    table.labels[n] = found.codeBase + ((uint32_t(bytes[2 * n]) << 8) | bytes[2 * n + 1]);
++                    break;
++                }
++            }
++            bool allOutside = true;
++            for (const auto label : table.labels)
++                allOutside = allOutside && !sameFunctionRegion(bctrAddress, label);
++            if (allOutside)
++                continue;  // a bounded function-address array: an indirect call, as above
++            emitTable(table);
++        }
++    }
++    if (unresolved)
++        fmt::println("XenonAnalyse: {} unresolved jump table(s)", unresolved);
++
+     std::ofstream f(argv[2]);
+     f.write(out.data(), out.size());
+ 
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -307,7 +307,32 @@
+             }
+             else
+             {
+-                auto& fn = functions.emplace_back(analyzeBounded(data, dataEnd - data, base));
++                auto candidate = analyzeBounded(data, dataEnd - data, base);
++                // R-comp patch 0021: this scan only guesses at code no table, call
++                // or branch names. When the straight-line flow of the guess runs
++                // into a non-zero word that does not decode (a block ends on it),
++                // the bytes are data, not a function: skip one word and guess again
++                // from the next. Declared and called functions keep the
++                // "Unable to decode" diagnostic.
++                bool runsIntoData = false;
++                for (const auto& block : candidate.blocks)
++                {
++                    if (block.size < 4)
++                        continue;
++                    const size_t last = candidate.base + block.base + block.size - 4;
++                    const auto* word = section.data + (last - section.base);
++                    ppc_insn decoded;
++                    ppc::Disassemble(word, 4, last, decoded);
++                    if (decoded.opcode == nullptr && *reinterpret_cast<const uint32_t*>(word) != 0)
++                        runsIntoData = true;
++                }
++                if (runsIntoData)
++                {
++                    base += 4;
++                    data += 4;
++                    continue;
++                }
++                auto& fn = functions.emplace_back(std::move(candidate));
+                 image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+ 
+                 base += fn.size;
+@@ -781,13 +806,52 @@
+             // The table index is a 32-bit value: the guarding cmplwi and the rlwinm that scales it
+             // only see the low word, while the 64-bit register may carry upper bits (addi on
+             // 0xFFFFFFFE gives 0x1_00000001). Switching on .u64 would then take `default`.
+-            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
++            // R-comp patch 0021: a table with `target = "ctr"` switches on the address
++            // the bctr goes to (CTR holds it, loaded from the table), one case per
++            // distinct label; an address outside the table takes `default` as an
++            // index outside it does.
++            const bool byTarget = switchTable->second.byTarget;
++            std::unordered_set<uint32_t> targetCases;
++            if (byTarget)
++                println("\tswitch ({}.u32) {{", ctr());
++            else
++                println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+-                println("\tcase {}:", i);
+                 auto label = switchTable->second.labels[i];
+-                if (label < fn.base || label >= fn.base + fn.size)
++                if (byTarget && !targetCases.insert(label).second)
++                    continue;
++                if (byTarget)
++                    println("\tcase 0x{:X}:", label);
++                else
++                    println("\tcase {}:", i);
++                const bool outside = label < fn.base || label >= fn.base + fn.size;
++                if (outside && *reinterpret_cast<const uint32_t*>(image.Find(label)) == 0)
++                {
++                    // R-comp patch 0021: a case the compiler marked unreachable
++                    // (MSVC points them past the end of the function, at its zero
++                    // padding). Executing a zero word raises a program exception on
++                    // the console; stop with that address, as for any other
++                    // undecodable word.
++                    println("\t\tPPC_TRAP(0x{:X});", label);
++                    println("\t\treturn;");
++                }
++                else if (outside && [&] {
++                    auto symbol = image.symbols.find(label);
++                    return symbol != image.symbols.end() && symbol->address == label && symbol->type == Symbol_Function;
++                }())
++                {
++                    // R-comp patch 0021: a case at the start of another function
++                    // (MSVC's unreachable cases point at the end of the function,
++                    // where the next one may begin) branches there, as on the
++                    // console: a tail call, the translation of any `b` to a
++                    // function start.
++                    print("\t");
++                    printFunctionCall(label);
++                    println("\t\treturn;");
++                }
++                else if (outside)
+                 {
+                     println("\t\t// ERROR: 0x{:X}", label);
+                     fmt::println("ERROR: Switch case at {:X} is trying to jump outside function: {:X}", base, label);
+@@ -803,7 +867,7 @@
+             // A runtime may diagnose an index the analysed guard did not exclude instead of
+             // reaching undefined behaviour.
+             println("#ifdef PPC_SWITCH_OUT_OF_RANGE");
+-            println("\t\tPPC_SWITCH_OUT_OF_RANGE(0x{:X}, {}.u32);", base, r(switchTable->second.r));
++            println("\t\tPPC_SWITCH_OUT_OF_RANGE(0x{:X}, {}.u32);", base, byTarget ? std::string(ctr()) : r(switchTable->second.r));
+             println("#endif");
+             println("\t\t__builtin_unreachable();");
+             println("\t}}");
+@@ -853,6 +917,34 @@
+         break;
+     }
+ 
++    case PPC_INST_BDZF:
++    case PPC_INST_BDZT:
++    {
++        // R-comp patch 0021: decrement CTR, branch if CTR == 0 and CR bit BI is
++        // false (bdzf) / true (bdzt). The CTR is tested on its low word, as for
++        // bdz/bdnz above. A target outside the function is a conditional tail
++        // call, as printConditionalBranch emits it.
++        static constexpr const char* kCrBits[] = { "lt", "gt", "eq", "so" };
++        const bool branchIfTrue = insn.opcode->id == PPC_INST_BDZT;
++        const uint32_t target = insn.operands[1];
++        println("\t--{}.u64;", ctr());
++        const auto condition = fmt::format("{}.u32 == 0 && {}{}.{}", ctr(), branchIfTrue ? "" : "!",
++            cr(insn.operands[0] / 4), kCrBits[insn.operands[0] % 4]);
++        if (target < fn.base || target >= fn.base + fn.size)
++        {
++            println("\tif ({}) {{", condition);
++            print("\t");
++            printFunctionCall(target);
++            println("\t\treturn;");
++            println("\t}}");
++        }
++        else
++        {
++            println("\tif ({}) goto loc_{:X};", condition, target);
++        }
++        break;
++    }
++
+     case PPC_INST_BEQ:
+         printConditionalBranch(false, "eq");
+         break;
+@@ -933,6 +1025,10 @@
+ 
+     case PPC_INST_CLRLDI:
+         println("\t{}.u64 = {}.u64 & 0x{:X};", r(insn.operands[0]), r(insn.operands[1]), (1ull << (64 - insn.operands[2])) - 1);
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_CLRLWI:
+@@ -975,6 +1071,10 @@
+ 
+     case PPC_INST_CNTLZD:
+         println("\t{0}.u64 = {1}.u64 == 0 ? 64 : __builtin_clzll({1}.u64);", r(insn.operands[0]), r(insn.operands[1]));
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_CNTLZW:
+@@ -1352,6 +1452,10 @@
+     case PPC_INST_LVEWX128:
+     case PPC_INST_LVX:
+     case PPC_INST_LVX128:
++    case PPC_INST_LVXL:
++    case PPC_INST_LVXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         // NOTE: for endian swapping, we reverse the whole vector instead of individual elements.
+         // this is accounted for in every instruction (eg. dp3 sums yzw instead of xyz)
+         print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(PPC_HOST_PTR((", v(insn.operands[0]));
+@@ -1362,6 +1466,10 @@
+ 
+     case PPC_INST_LVLX:
+     case PPC_INST_LVLX128:
++    case PPC_INST_LVLXL:
++    case PPC_INST_LVLXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         print("\t{}.u32 = ", temp());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+@@ -1371,6 +1479,10 @@
+ 
+     case PPC_INST_LVRX:
+     case PPC_INST_LVRX128:
++    case PPC_INST_LVRXL:
++    case PPC_INST_LVRXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         print("\t{}.u32 = ", temp());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+@@ -1466,6 +1578,11 @@
+             println("\t{}.u64 = ctx.lr;", r(insn.operands[0]));
+         break;
+ 
++    case PPC_INST_MFCTR:
++        // R-comp patch 0021: rD = CTR.
++        println("\t{}.u64 = {}.u64;", r(insn.operands[0]), ctr());
++        break;
++
+     case PPC_INST_MFMSR:
+         if (!config.skipMsr)
+             println("\t{}.u64 = ctx.msr;", r(insn.operands[0]));
+@@ -1590,16 +1707,28 @@
+ 
+     case PPC_INST_RLDICL:
+         println("\t{}.u64 = __builtin_rotateleft64({}.u64, {}) & 0x{:X};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2], ComputeMask(insn.operands[3], 63));
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_RLDICR:
+         println("\t{}.u64 = __builtin_rotateleft64({}.u64, {}) & 0x{:X};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2], ComputeMask(0, insn.operands[3]));
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_RLDIMI:
+     {
+         const uint64_t mask = ComputeMask(insn.operands[3], ~insn.operands[2]);
+         println("\t{}.u64 = (__builtin_rotateleft64({}.u64, {}) & 0x{:X}) | ({}.u64 & 0x{:X});", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2], mask, r(insn.operands[0]), ~mask);
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+     }
+ 
+@@ -1618,6 +1747,10 @@
+ 
+     case PPC_INST_ROTLDI:
+         println("\t{}.u64 = __builtin_rotateleft64({}.u64, {});", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2]);
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_ROTLW:
+@@ -1632,6 +1765,10 @@
+ 
+     case PPC_INST_SLD:
+         println("\t{}.u64 = {}.u8 & 0x40 ? 0 : ({}.u64 << ({}.u8 & 0x7F));", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_SLW:
+@@ -1645,6 +1782,10 @@
+         println("\tif ({}.u64 > 0x3F) {}.u64 = 0x3F;", temp(), temp());
+         println("\t{}.ca = ({}.s64 < 0) & ((({}.s64 >> {}.u64) << {}.u64) != {}.s64);", xer(), r(insn.operands[1]), r(insn.operands[1]), temp(), temp(), r(insn.operands[1]));
+         println("\t{}.s64 = {}.s64 >> {}.u64;", r(insn.operands[0]), r(insn.operands[1]), temp());
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_SRADI:
+@@ -1658,6 +1799,10 @@
+             println("\t{}.ca = 0;", xer());
+             println("\t{}.s64 = {}.s64;", r(insn.operands[0]), r(insn.operands[1]));
+         }
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_SRAW:
+@@ -1686,6 +1831,10 @@
+ 
+     case PPC_INST_SRD:
+         println("\t{}.u64 = {}.u8 & 0x40 ? 0 : ({}.u64 >> ({}.u8 & 0x7F));", r(insn.operands[0]), r(insn.operands[2]), r(insn.operands[1]), r(insn.operands[2]));
++        // R-comp patch 0021: record form of a doubleword result. CR0 compares the
++        // 64-bit result (64-bit mode, as Xenia's UpdateCR on the i64 value).
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_SRW:
+@@ -1834,6 +1983,10 @@
+ 
+     case PPC_INST_STVLX:
+     case PPC_INST_STVLX128:
++    case PPC_INST_STVLXL:
++    case PPC_INST_STVLXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         // TODO: vectorize
+         // NOTE: accounting for the full vector reversal here
+         print("\t{} = ", ea());
+@@ -1847,6 +2000,10 @@
+ 
+     case PPC_INST_STVRX:
+     case PPC_INST_STVRX128:
++    case PPC_INST_STVRXL:
++    case PPC_INST_STVRXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         // TODO: vectorize
+         // NOTE: accounting for the full vector reversal here
+         print("\t{} = ", ea());
+@@ -1860,6 +2017,10 @@
+ 
+     case PPC_INST_STVX:
+     case PPC_INST_STVX128:
++    case PPC_INST_STVXL:
++    case PPC_INST_STVXL128:
++        // R-comp patch 0021: the "LRU" forms (lvxl, stvxl, lvlxl, lvrxl, stvlxl,
++        // stvrxl and their VMX128 encodings) only add a cache replacement hint.
+         // One macro for the whole store (patch 0017): the runtime sees the old and the new bytes of the line.
+         print("\tPPC_VSTORE128(((");
+         if (insn.operands[1] != 0)
+@@ -2623,6 +2784,149 @@
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
++    // ---- R-comp patch 0021: the remaining load/store "with update" forms, lhbrx.
++    // EA = (rA) + d (D form, operands rT, d, rA) or (rA) + (rB) (X form, operands
++    // rT, rA, rB); the access is made at EA, then rA = EA. The ISA leaves rA = 0
++    // and, for loads, rA = rT invalid; the decoder only names these forms with
++    // rA != 0. EA is computed before the access, so rT == rB and rS == rA keep
++    // the ISA order (a store writes the old rS). Every access uses the scalar
++    // PPC_LOAD_* / PPC_STORE_* macros (write tracking, 0xE0000000 window), and a
++    // store followed by eieio uses PPC_MM_STORE_* as the non-update forms do.
++    case PPC_INST_LHZU: case PPC_INST_LHAU: case PPC_INST_LFSU: case PPC_INST_LFDU:
++    case PPC_INST_STHU: case PPC_INST_STFSU: case PPC_INST_STFDU:
++    case PPC_INST_LBZUX: case PPC_INST_LHZUX: case PPC_INST_LHAUX: case PPC_INST_LWZUX: case PPC_INST_LWAUX:
++    case PPC_INST_LDUX: case PPC_INST_LFSUX: case PPC_INST_LFDUX:
++    case PPC_INST_STBUX: case PPC_INST_STHUX: case PPC_INST_STDUX: case PPC_INST_STFSUX: case PPC_INST_STFDUX:
++    {
++        const auto id = insn.opcode->id;
++        const bool dForm = id == PPC_INST_LHZU || id == PPC_INST_LHAU || id == PPC_INST_LFSU || id == PPC_INST_LFDU ||
++            id == PPC_INST_STHU || id == PPC_INST_STFSU || id == PPC_INST_STFDU;
++        const size_t ra = dForm ? insn.operands[2] : insn.operands[1];
++        if (dForm)
++            println("\t{} = {} + {}.u32;", ea(), int32_t(insn.operands[1]), r(ra));
++        else
++            println("\t{} = {}.u32 + {}.u32;", ea(), r(ra), r(insn.operands[2]));
++        auto store = [&](const char* width, const std::string& value)
++            {
++                println("\t{}{}({}, {});", mmioStore() ? "PPC_MM_STORE_" : "PPC_STORE_", width, ea(), value);
++            };
++        switch (id)
++        {
++        case PPC_INST_LBZUX:
++            println("\t{}.u64 = PPC_LOAD_U8({});", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LHZU: case PPC_INST_LHZUX:
++            println("\t{}.u64 = PPC_LOAD_U16({});", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LHAU: case PPC_INST_LHAUX:
++            println("\t{}.s64 = int16_t(PPC_LOAD_U16({}));", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LWZUX:
++            println("\t{}.u64 = PPC_LOAD_U32({});", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LWAUX:
++            println("\t{}.s64 = int32_t(PPC_LOAD_U32({}));", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LDUX:
++            println("\t{}.u64 = PPC_LOAD_U64({});", r(insn.operands[0]), ea());
++            break;
++        case PPC_INST_LFSU: case PPC_INST_LFSUX:
++            // Single to double: exact, as lfs/lfsx above.
++            printSetFlushMode(false);
++            println("\t{}.u32 = PPC_LOAD_U32({});", temp(), ea());
++            println("\t{}.f64 = double({}.f32);", f(insn.operands[0]), temp());
++            break;
++        case PPC_INST_LFDU: case PPC_INST_LFDUX:
++            printSetFlushMode(false);
++            println("\t{}.u64 = PPC_LOAD_U64({});", f(insn.operands[0]), ea());
++            break;
++        case PPC_INST_STBUX:
++            store("U8", fmt::format("{}.u8", r(insn.operands[0])));
++            break;
++        case PPC_INST_STHU: case PPC_INST_STHUX:
++            store("U16", fmt::format("{}.u16", r(insn.operands[0])));
++            break;
++        case PPC_INST_STDUX:
++            store("U64", fmt::format("{}.u64", r(insn.operands[0])));
++            break;
++        case PPC_INST_STFSU: case PPC_INST_STFSUX:
++            // Double to single: rounded as stfs/stfsx above.
++            printSetFlushMode(false);
++            println("\t{}.f32 = float({}.f64);", temp(), f(insn.operands[0]));
++            store("U32", fmt::format("{}.u32", temp()));
++            break;
++        case PPC_INST_STFDU: case PPC_INST_STFDUX:
++            printSetFlushMode(false);
++            store("U64", fmt::format("{}.u64", f(insn.operands[0])));
++            break;
++        }
++        println("\t{}.u32 = {};", r(ra), ea());
++        break;
++    }
++
++    case PPC_INST_LHBRX:
++        // R-comp patch 0021: load halfword byte-reversed, zero-extended (the
++        // load counterpart of sthbrx above).
++        print("\t{}.u64 = __builtin_bswap16(PPC_LOAD_U16(", r(insn.operands[0]));
++        if (insn.operands[1] != 0)
++            print("{}.u32 + ", r(insn.operands[1]));
++        println("{}.u32));", r(insn.operands[2]));
++        break;
++
++    // ---- R-comp patch 0021: VMX integer forms. Element-wise operations do not
++    // depend on the element order, so they keep this file's reversed register
++    // layout (host u32[i] is the big-endian word 3 - i).
++    case PPC_INST_VSUBUWM:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u32, simde_mm_sub_epi32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_load_si128((simde__m128i*){}.u32)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VSUBUBM:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_sub_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VADDUHS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_adds_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VADDSWS:
++    case PPC_INST_VSUBUWS:
++    {
++        // Saturating word add (signed) / subtract (unsigned), per element through
++        // 64 bits as vsubsws above. VSCR[SAT] is not modelled, as for the other
++        // saturating forms of this file.
++        const bool add = insn.opcode->id == PPC_INST_VADDSWS;
++        for (size_t i = 0; i < 4; i++)
++        {
++            if (add)
++            {
++                println("\t{}.s64 = int64_t({}.s32[{}]) + int64_t({}.s32[{}]);", temp(), v(insn.operands[1]), i, v(insn.operands[2]), i);
++                println("\t{}.s32[{}] = {}.s64 > INT_MAX ? INT_MAX : {}.s64 < INT_MIN ? INT_MIN : int32_t({}.s64);", vTemp(), i, temp(), temp(), temp());
++            }
++            else
++            {
++                println("\t{}.u32[{}] = {}.u32[{}] > {}.u32[{}] ? {}.u32[{}] - {}.u32[{}] : 0;", vTemp(), i,
++                    v(insn.operands[1]), i, v(insn.operands[2]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++            }
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    }
++
++    case PPC_INST_VCMPGTUW:
++        // Unsigned compare: bias both sides by 0x80000000 and compare signed.
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epi32(simde_mm_xor_si128(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(INT_MIN)), simde_mm_xor_si128(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_set1_epi32(INT_MIN))));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.setFromMask(simde_mm_load_ps({}.f32), 0xF);", cr(6), v(insn.operands[0]));
++        break;
++
++    case PPC_INST_VRLW:
++    case PPC_INST_VRLW128:
++        // Rotate each word left by the low 5 bits of the same word of vB.
++        for (size_t i = 0; i < 4; i++)
++            println("\t{}.u32[{}] = __builtin_rotateleft32({}.u32[{}], {}.u32[{}] & 0x1F);", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
+     case PPC_INST_TRAP:
+     case PPC_INST_TW: case PPC_INST_TWI: case PPC_INST_TD: case PPC_INST_TDI:
+     case PPC_INST_TWLT: case PPC_INST_TWLE: case PPC_INST_TWEQ: case PPC_INST_TWGE: case PPC_INST_TWGT: case PPC_INST_TWNE:
+@@ -2819,7 +3123,14 @@
+             println("\t// {}", insn.op_str);
+ #if 1
+             if (*data != 0)
++            {
+                 fmt::println("Unable to decode instruction {:X} at {:X}", *data, base);
++                // R-comp patch 0021: reaching an undecodable word raises a program
++                // exception on the console; stop with its address instead of
++                // falling through to the next word (the runtime reads the word and
++                // reports a guest trap). Zero padding keeps its comment only.
++                println("\tPPC_TRAP(0x{:X});", base);
++            }
+ #endif
+         }
+         else
+--- a/XenonRecomp/recompiler_config.cpp
++++ b/XenonRecomp/recompiler_config.cpp
+@@ -83,6 +83,7 @@
+                     auto& table = *entry.as_table();
+                     RecompilerSwitchTable switchTable;
+                     switchTable.r = *table["r"].value<uint32_t>();
++                    switchTable.byTarget = table["target"].value_or(std::string_view{}) == "ctr";
+                     for (auto& label : *table["labels"].as_array())
+                     {
+                         switchTable.labels.push_back(*label.value<uint32_t>());
+--- a/XenonRecomp/recompiler_config.h
++++ b/XenonRecomp/recompiler_config.h
+@@ -4,6 +4,10 @@
+ {
+     uint32_t r;
+     std::vector<uint32_t> labels;
++    // R-comp patch 0021: dispatch on the branch target in CTR instead of on the
++    // index register `r` (TOML `target = "ctr"`), for code that reuses the index
++    // register before its bctr.
++    bool byTarget = false;
+ };
+ 
+ struct RecompilerMidAsmHook
+--- a/thirdparty/disasm/ppc-dis.c
++++ b/thirdparty/disasm/ppc-dis.c
+@@ -5350,7 +5350,14 @@
+ 
+     if (info->disassembler_options
+         && strstr(info->disassembler_options, "cell") != NULL)
++    {
+         dialect |= PPC_OPCODE_POWER4 | PPC_OPCODE_CELL | PPC_OPCODE_ALTIVEC | PPC_OPCODE_VMX_128;
++        // R-comp patch 0021: the Xenon has no PowerPC 403/405 instructions. Their
++        // opcode-4 multiply-accumulate forms (macchwu = XO(4,140), maclhwu =
++        // XO(4,396), ...) overlap VMX128 encodings and are listed first, so
++        // some vsldoi128 words (VX128_5(4, 16)) decoded as them.
++        dialect &= ~PPC_OPCODE_403;
++    }
+ 
+     if (info->disassembler_options
+         && strstr(info->disassembler_options, "power6") != NULL)

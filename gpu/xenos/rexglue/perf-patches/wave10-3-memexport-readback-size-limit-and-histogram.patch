@@ -1,0 +1,266 @@
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h	2026-10-03 23:21:58.651187400 +0200
++++ b/include/rex/graphics/vulkan/command_processor.h	2026-10-03 23:21:58.671698100 +0200
+@@ -1161,9 +1161,24 @@
+     uint64_t flushes[kRcompMxTriggerCount] = {}, blocking[kRcompMxTriggerCount] = {}, blocking_us[kRcompMxTriggerCount] = {};
+     // The SDK paths (mode 0): fast path copies read from an older slot, fast path fallbacks to the full path, full path waits.
+     uint64_t sdk_fast_hits = 0, sdk_fast_to_full = 0, sdk_full_waits = 0, sdk_full_wait_us = 0;
+-    // Mode 3: CPU invalidations that hit memexported pages, and those pages.
+-    uint64_t cpu_write_events = 0, cpu_write_pages = 0;
++    // CPU invalidations that hit memexported pages not read back (mode 3, or over rcomp_memexport_readback_max_bytes), those
++    // pages, and the draws and bytes not read back.
++    uint64_t cpu_write_events = 0, cpu_write_pages = 0, skipped_draws = 0, skipped_bytes = 0;
++    uint64_t cpu_write_pages_by_bucket[8] = {};
+   };
++  // wave10-3: memexport draw sizes (the total of a draw's ranges) by bucket, and their first base addresses, per report period.
++  static constexpr uint32_t kRcompMxSizeBuckets = 8;
++  struct RcompMxSizeStat {
++    uint64_t draws = 0, bytes = 0, bases_overflow = 0;
++    std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> bases;  // base -> (draws, largest size)
++  };
++  static uint32_t RcompMxSizeBucket(uint32_t bytes);
++  void RcompMxNoteSize(uint32_t bucket, uint32_t bytes);
++  void RcompMxMarkUnreadPages(uint32_t bucket);
++  void RcompMxSizeReport();
++  RcompMxSizeStat rcomp_mx_sizes_[kRcompMxSizeBuckets];
++  uint64_t rcomp_mx_sizes_frame_ = 0;
++  uint32_t rcomp_mx_max_bytes_ = 0;
+   void RcompMxNoteDraw();
+   void RcompMxEmitCopies();
+   void RcompMxRetire(bool safe);
+@@ -1193,8 +1208,9 @@
+   bool rcomp_mx_retiring_ = false;
+   bool rcomp_mx_flushing_ = false;
+   RcompMxStats rcomp_mx_stats_;
+-  // Mode 3: one bit per 4 KiB page a memexport draw wrote since the CPU last wrote it.
+-  std::vector<uint64_t> rcomp_mx_page_bits_;
++  // One byte per 4 KiB page that a memexport draw not read back wrote since the CPU last wrote it (size bucket + 1).
++  std::vector<uint8_t> rcomp_mx_page_bucket_;
++  uint64_t rcomp_mx_unread_pages_ = 0;
+   uint64_t rcomp_mx_last_report_frame_ = 0;
+ };
+ 
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp	2026-10-03 23:21:58.767062000 +0200
++++ b/src/graphics/vulkan/command_processor.cpp	2026-10-03 23:21:58.788575900 +0200
+@@ -225,6 +225,15 @@
+     .range(0, 3)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// R-comp (wave 10-3): the SDK's memexport read-back (mode 0 above) only for the draws whose memexport ranges total at most N bytes
++// (0 = every draw, the SDK's behavior); larger ones are not read back, as with readback_memexport=false. Mirrors
++// rcomp_readback_resolve_max_bytes: a title's CPU may consume small exports (Halo 3's exposure) while its large ones (particles,
++// 560 KB a draw) stay on the GPU. RCOMP-MEMEXPORT-SIZES (every 300 frames) gives the size distribution to choose N.
++REXCVAR_DEFINE_INT32(rcomp_memexport_readback_max_bytes, 0, "GPU/Vulkan",
++                     "Memexport read-back (SDK paths) only for draws exporting at most this many bytes (0 = every draw)")
++    .range(0, 0x7FFFFFFF)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+@@ -1117,9 +1126,9 @@
+   }
+   vertex_buffer_watch_handle_ = shared_memory_->RegisterGlobalWatch(VertexBufferWatchThunk, this);
+   rcomp_mx_mode_ = REXCVAR_GET(rcomp_memexport_readback_async);
+-  if (rcomp_mx_mode_ == 3) {
+-    rcomp_mx_page_bits_.assign(size_t(SharedMemory::kBufferSize >> 12) / 64, 0);
+-  }
++  rcomp_mx_max_bytes_ = uint32_t(std::max(REXCVAR_GET(rcomp_memexport_readback_max_bytes), 0));
++  rcomp_mx_page_bucket_.assign(size_t(SharedMemory::kBufferSize >> 12), 0);
++  std::fprintf(stderr, "RCOMP-MEMEXPORT-RB limit max_bytes=%u\n", rcomp_mx_max_bytes_);
+   std::fprintf(stderr, "RCOMP-MEMEXPORT-RB config mode=%d readback_memexport=%u fast=%u\n", int(rcomp_mx_mode_),
+                unsigned(IsReadbackMemexportEnabled(REXCVAR_GET(vulkan_readback_memexport))),
+                unsigned(REXCVAR_GET(readback_memexport_fast)));
+@@ -4085,27 +4094,121 @@
+   return true;
+ }
+ 
++uint32_t VulkanCommandProcessor::RcompMxSizeBucket(uint32_t bytes) {
++  // <=256, <=1K, <=4K, <=16K, <=64K, <=256K, <=1M, more.
++  uint32_t bucket = 0;
++  uint32_t limit = 256;
++  while (bucket + 1 < kRcompMxSizeBuckets && bytes > limit) {
++    ++bucket;
++    limit <<= 2;
++  }
++  return bucket;
++}
++
++void VulkanCommandProcessor::RcompMxNoteSize(uint32_t bucket, uint32_t bytes) {
++  RcompMxSizeStat& stat = rcomp_mx_sizes_[bucket];
++  ++stat.draws;
++  stat.bytes += bytes;
++  const uint32_t base = memexport_ranges_.front().base_address_dwords << 2;
++  auto it = stat.bases.find(base);
++  if (it != stat.bases.end()) {
++    ++it->second.first;
++    it->second.second = std::max(it->second.second, bytes);
++  } else if (stat.bases.size() < 4096) {
++    stat.bases.emplace(base, std::make_pair(uint64_t(1), bytes));
++  } else {
++    ++stat.bases_overflow;
++  }
++}
++
++void VulkanCommandProcessor::RcompMxMarkUnreadPages(uint32_t bucket) {
++  for (const draw_util::MemExportRange& range : memexport_ranges_) {
++    const uint64_t first = uint64_t(range.base_address_dwords) << 2;
++    if (!range.size_bytes || first >= SharedMemory::kBufferSize) {
++      continue;
++    }
++    const uint64_t last = std::min(first + range.size_bytes, uint64_t(SharedMemory::kBufferSize)) - 1;
++    for (uint64_t page = first >> 12; page <= (last >> 12); ++page) {
++      uint8_t& mark = rcomp_mx_page_bucket_[page];
++      if (!mark) {
++        ++rcomp_mx_unread_pages_;
++      }
++      mark = uint8_t(std::max(uint32_t(mark), bucket + 1));
++    }
++  }
++}
++
++void VulkanCommandProcessor::RcompMxSizeReport() {
++  static const char* const kBucketNames[kRcompMxSizeBuckets] = {"256", "1K", "4K", "16K", "64K", "256K", "1M", "more"};
++  const double frames = double(std::max<uint64_t>(frame_current_ - rcomp_mx_sizes_frame_, 1));
++  char line[1536];
++  int n = std::snprintf(line, sizeof(line),
++                        "RCOMP-MEMEXPORT-SIZES frame=%llu frames=%.0f max_bytes=%u (bucket<=size: draws/frame "
++                        "KB/frame distinct_bases cpu_written_unread_pages_total)",
++                        (unsigned long long)frame_current_, frames, rcomp_mx_max_bytes_);
++  for (uint32_t i = 0; i < kRcompMxSizeBuckets && n > 0 && n < int(sizeof(line)); ++i) {
++    const RcompMxSizeStat& stat = rcomp_mx_sizes_[i];
++    if (!stat.draws && !rcomp_mx_stats_.cpu_write_pages_by_bucket[i]) {
++      continue;
++    }
++    n += std::snprintf(line + n, sizeof(line) - n, " %s:%.1f/%.1f/%zu%s/%llu", kBucketNames[i], double(stat.draws) / frames,
++                       double(stat.bytes) / 1024.0 / frames, stat.bases.size(), stat.bases_overflow ? "+" : "",
++                       (unsigned long long)rcomp_mx_stats_.cpu_write_pages_by_bucket[i]);
++  }
++  std::fprintf(stderr, "%s\n", line);
++  // The exports of at most 4 KiB by base address (most frequent first): the candidates a CPU consumes.
++  std::vector<std::pair<uint64_t, std::pair<uint32_t, uint32_t>>> small;
++  for (uint32_t i = 0; i <= 2; ++i) {
++    for (const auto& base : rcomp_mx_sizes_[i].bases) {
++      small.push_back({base.second.first, {base.first, base.second.second}});
++    }
++  }
++  std::sort(small.begin(), small.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++  if (!small.empty()) {
++    n = std::snprintf(line, sizeof(line), "RCOMP-MEMEXPORT-SMALL frame=%llu (base:bytes:draws/frame)",
++                      (unsigned long long)frame_current_);
++    for (size_t i = 0; i < small.size() && i < 16 && n > 0 && n < int(sizeof(line)); ++i) {
++      n += std::snprintf(line + n, sizeof(line) - n, " 0x%08X:%u:%.2f", small[i].second.first, small[i].second.second,
++                         double(small[i].first) / frames);
++    }
++    std::fprintf(stderr, "%s\n", line);
++  }
++  for (RcompMxSizeStat& stat : rcomp_mx_sizes_) {
++    stat = RcompMxSizeStat();
++  }
++  rcomp_mx_sizes_frame_ = frame_current_;
++}
++
+ void VulkanCommandProcessor::RcompMxNoteCpuInvalidation(uint32_t address_first, uint32_t address_last) {
+-  if (rcomp_mx_mode_ == 3) {
+-    // The CPU wrote pages a memexport draw wrote and nothing read back: the GPU will upload the guest's bytes over them.
++  if (rcomp_mx_unread_pages_) {
++    // The CPU wrote pages that a memexport draw wrote and that were not read back (mode 3, or larger than
++    // rcomp_memexport_readback_max_bytes): the GPU will upload the guest's bytes over the exported data there.
+     const uint64_t last = std::min(uint64_t(address_last), uint64_t(SharedMemory::kBufferSize) - 1);
+     uint64_t hit_pages = 0;
++    uint32_t hit_bucket = 0;
+     for (uint64_t page = address_first >> 12; page <= (last >> 12); ++page) {
+-      uint64_t& word = rcomp_mx_page_bits_[page >> 6];
+-      const uint64_t bit = uint64_t(1) << (page & 63);
+-      if (word & bit) {
+-        word &= ~bit;
++      uint8_t& mark = rcomp_mx_page_bucket_[page];
++      if (mark) {
++        hit_bucket = std::max(hit_bucket, uint32_t(mark - 1));
++        ++rcomp_mx_stats_.cpu_write_pages_by_bucket[mark - 1];
++        mark = 0;
+         ++hit_pages;
++        --rcomp_mx_unread_pages_;
+       }
+     }
+     if (hit_pages) {
+       ++rcomp_mx_stats_.cpu_write_events;
+       rcomp_mx_stats_.cpu_write_pages += hit_pages;
+-      if (rcomp_mx_stats_.cpu_write_events <= 16) {
+-        std::fprintf(stderr, "RCOMP-MEMEXPORT-CPU-WRITE frame=%llu range=0x%08X-0x%08X memexported_pages=%llu\n",
+-                     (unsigned long long)frame_current_, address_first, address_last, (unsigned long long)hit_pages);
++      if (rcomp_mx_stats_.cpu_write_events <= 32 || (rcomp_mx_stats_.cpu_write_events & 1023) == 0) {
++        std::fprintf(stderr,
++                     "RCOMP-MEMEXPORT-CPU-WRITE n=%llu frame=%llu range=0x%08X-0x%08X unread_exported_pages=%llu "
++                     "largest_export_bucket=%u\n",
++                     (unsigned long long)rcomp_mx_stats_.cpu_write_events, (unsigned long long)frame_current_, address_first,
++                     address_last, (unsigned long long)hit_pages, hit_bucket);
+       }
+     }
++  }
++  if (rcomp_mx_mode_ == 3 || rcomp_mx_mode_ == 0) {
+     return;
+   }
+   if ((rcomp_mx_pending_.empty() && rcomp_mx_unflushed_.empty()) || rcomp_mx_cpu_overlap_ ||
+@@ -4428,17 +4531,19 @@
+ 
+ void VulkanCommandProcessor::RcompMxReport() {
+   const RcompMxStats& s = rcomp_mx_stats_;
+-  if ((!rcomp_mx_mode_ && !s.sdk_fast_hits && !s.sdk_full_waits) || frame_current_ < rcomp_mx_last_report_frame_ + 300) {
++  if ((!rcomp_mx_mode_ && !s.sdk_fast_hits && !s.sdk_full_waits && !s.skipped_draws) ||
++      frame_current_ < rcomp_mx_last_report_frame_ + 300) {
+     return;
+   }
+   rcomp_mx_last_report_frame_ = frame_current_;
++  RcompMxSizeReport();
+   const uint64_t retired = s.retired_polled + s.retired_flushed;
+   std::fprintf(stderr,
+                "RCOMP-MEMEXPORT-RB frame=%llu mode=%d draws=%llu draw_bytes=%llu copies=%llu copied_bytes=%llu "
+                "retired_polled=%llu retired_flushed=%llu avg_lag_frames=%.2f pending=%zu max_pending=%llu chunks=%llu "
+                "deferred_writes=%llu deferred_irqs=%llu applied=%llu avg_visible_delay_us=%.0f queued=%zu max_queued=%llu "
+                "sdk_fast_hits=%llu sdk_fast_to_full=%llu sdk_full_waits=%llu sdk_full_wait_ms=%.1f cpu_write_events=%llu "
+-               "cpu_write_pages=%llu\n",
++               "cpu_write_pages=%llu skipped_draws=%llu skipped_bytes=%llu unread_pages=%llu\n",
+                (unsigned long long)frame_current_, int(rcomp_mx_mode_), (unsigned long long)s.draws,
+                (unsigned long long)s.bytes, (unsigned long long)s.copies, (unsigned long long)s.copied_bytes,
+                (unsigned long long)s.retired_polled, (unsigned long long)s.retired_flushed,
+@@ -4449,7 +4554,8 @@
+                (unsigned long long)s.max_visible, (unsigned long long)s.sdk_fast_hits,
+                (unsigned long long)s.sdk_fast_to_full, (unsigned long long)s.sdk_full_waits,
+                double(s.sdk_full_wait_us) * 1e-3, (unsigned long long)s.cpu_write_events,
+-               (unsigned long long)s.cpu_write_pages);
++               (unsigned long long)s.cpu_write_pages, (unsigned long long)s.skipped_draws,
++               (unsigned long long)s.skipped_bytes, (unsigned long long)rcomp_mx_unread_pages_);
+   if (rcomp_mx_mode_ == 1 || rcomp_mx_mode_ == 2) {
+     static const char* const kNames[kRcompMxTriggerCount] = {
+         "inval", "irq", "shd", "ext", "zpd", "memw", "r2m", "condw", "scratch", "waitreg", "capacity", "sdk", "shutdown", "idle"};
+@@ -5520,20 +5626,14 @@
+       memexport_total_size += memexport_range.size_bytes;
+     }
+     if (memexport_total_size) {
+-      if (rcomp_mx_mode_ == 3) {
+-        // No copy: only the pages are remembered, to count CPU writes into them (RCOMP-MEMEXPORT-RB cpu_write_*).
+-        for (const draw_util::MemExportRange& range : memexport_ranges_) {
+-          const uint64_t first = uint64_t(range.base_address_dwords) << 2;
+-          if (!range.size_bytes || first >= SharedMemory::kBufferSize) {
+-            continue;
+-          }
+-          const uint64_t last = std::min(first + range.size_bytes, uint64_t(SharedMemory::kBufferSize)) - 1;
+-          for (uint64_t page = first >> 12; page <= (last >> 12); ++page) {
+-            rcomp_mx_page_bits_[page >> 6] |= uint64_t(1) << (page & 63);
+-          }
+-        }
+-        ++rcomp_mx_stats_.draws;
+-        rcomp_mx_stats_.bytes += memexport_total_size;
++      const uint32_t rcomp_bucket = RcompMxSizeBucket(memexport_total_size);
++      RcompMxNoteSize(rcomp_bucket, memexport_total_size);
++      const bool rcomp_over_limit = rcomp_mx_max_bytes_ && memexport_total_size > rcomp_mx_max_bytes_;
++      if (rcomp_mx_mode_ == 3 || (rcomp_mx_mode_ == 0 && rcomp_over_limit)) {
++        // No copy: only the pages are remembered, to count CPU writes into them (RCOMP-MEMEXPORT-CPU-WRITE).
++        RcompMxMarkUnreadPages(rcomp_bucket);
++        ++rcomp_mx_stats_.skipped_draws;
++        rcomp_mx_stats_.skipped_bytes += memexport_total_size;
+       } else if (rcomp_mx_mode_ != 0) {
+         // Copied with the submission's other memexport ranges at its end (RcompMxEmitCopies).
+         RcompMxNoteDraw();

@@ -1,0 +1,33 @@
+diff -ruN a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+--- a/include/rex/graphics/command_processor.h	2026-09-26 07:04:57.467680143 +0000
++++ b/include/rex/graphics/command_processor.h	2026-09-26 07:04:57.368850145 +0000
+@@ -30,6 +30,7 @@
+ 
+ #include <rex/graphics/gpu_host.h>
+ #include <rex/thread.h>
++#include <rcomp_xenos/host_thread.h>  // R-comp patch 0007
+ 
+ namespace rex::stream {
+ class ByteStream;
+@@ -237,7 +238,7 @@
+   RegisterFile* register_file_ = nullptr;
+ 
+   std::atomic<bool> worker_running_;
+-  std::thread worker_thread_;
++  rcomp::xenos::HostThread worker_thread_;  // R-comp patch 0007
+   std::atomic<std::thread::id> worker_thread_id_{};
+ 
+   std::queue<std::function<void()>> pending_fns_;
+diff -ruN a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp	2026-09-26 07:04:57.473789146 +0000
++++ b/src/graphics/command_processor.cpp	2026-09-26 07:04:50.212590167 +0000
+@@ -134,7 +134,8 @@
+ 
+   worker_running_ = true;
+   // R-comp patch 0003: a plain host thread (no guest thread object).
+-  worker_thread_ = std::thread([this]() {
++  // R-comp patch 0007: explicit stack size (rcomp::xenos::HostThread).
++  worker_thread_.Start([this]() {
+     worker_thread_id_ = std::this_thread::get_id();
+     WorkerThreadMain();
+   });

@@ -1,0 +1,120 @@
+--- a/gpu/xenos/rexglue/rcomp/vulkan_output.h
++++ b/gpu/xenos/rexglue/rcomp/vulkan_output.h
+@@ -14,6 +14,7 @@
+ #include <string>
+ #include <vector>
+ 
++#include "guest_output_presentation_cursor.h"
+ #include "vulkan_display.h"
+ #include "xenos_host.h"
+ 
+@@ -43,7 +44,8 @@
+ 
+     // Last presented guest frame, R8G8B8X8 rows (stride = 4 * width).
+     bool Capture(std::vector<uint8_t>* rgbx, uint32_t* width, uint32_t* height) const;
+-    // false with an empty error means no guest frame is available yet.
++    // false with an empty error means no new guest output needs presentation.
++    // Repeated polls of one published output perform no blit, submit or WSI.
+     // false with an error means that presentation failed.
+     bool PresentGuestFrame(VulkanDisplay& display, std::string* error) const;
+     std::string device_name() const;
+@@ -53,6 +55,9 @@
+ private:
+     VulkanOutput() = default;
+     uint32_t draw_resolution_scale_x_ = 1, draw_resolution_scale_y_ = 1;
++    // Unique CPU identity for the immutable presenter_ lifetime, not a VkImage.
++    std::shared_ptr<const GuestOutputPresentationEpoch> presentation_epoch_ =
++        std::make_shared<GuestOutputPresentationEpoch>();
+     std::unique_ptr<rex::ui::GraphicsProvider> provider_;
+     std::unique_ptr<rex::ui::Presenter> presenter_;
+ };
+--- a/gpu/xenos/rexglue/rcomp/vulkan_output.cpp
++++ b/gpu/xenos/rexglue/rcomp/vulkan_output.cpp
+@@ -112,8 +112,13 @@
+     auto* presenter = static_cast<rex::ui::vulkan::VulkanPresenter*>(presenter_.get());
+     return presenter->VisitGuestOutputImage(
+         [&](const rex::ui::vulkan::VulkanDevice* device, VkImage image, VkExtent2D extent,
+-            VkFormat format, VkImageLayout layout) {
+-            return display.PresentGuestImage(device, image, extent, format, layout, error);
++            VkFormat format, VkImageLayout layout, uint64_t refresh_serial) {
++            // ConsumeGuestOutput still pins the source for this entire callback.
++            // The cursor is per display, so a recreated/second display paints once.
++            return display.guest_output_presentation_cursor_.PresentIfChanged(
++                presentation_epoch_, refresh_serial, [&] {
++                    return display.PresentGuestImage(device, image, extent, format, layout, error);
++                });
+         });
+ }
+ 
+--- a/gpu/xenos/rexglue/rcomp/vulkan_display.h
++++ b/gpu/xenos/rexglue/rcomp/vulkan_display.h
+@@ -16,6 +16,8 @@
+ #include <vector>
+ 
+ #include <rex/ui/vulkan/api.h>
++
++#include "guest_output_presentation_cursor.h"
+ 
+ namespace rex::ui::vulkan {
+ class VulkanProvider;
+@@ -53,6 +55,8 @@
+                            VkImageLayout source_layout, std::string* error);
+ 
+ private:
++    friend class VulkanOutput;
++    GuestOutputPresentationCursor guest_output_presentation_cursor_;
+     VulkanDisplay() = default;
+     bool Init(uint32_t guest_width, uint32_t guest_height, std::string* error);
+     bool EnsureStaging(uint32_t w, uint32_t h, std::string* error);
+--- a/gpu/xenos/rexglue/rcomp/vulkan_display.cpp
++++ b/gpu/xenos/rexglue/rcomp/vulkan_display.cpp
+@@ -233,6 +233,8 @@
+ 
+ bool VulkanDisplay::Present(const uint8_t* rgbx, uint32_t w, uint32_t h, std::vector<uint8_t>* readback,
+                             std::string* error) {
++    // A CPU presentation may replace the image kept by the direct path.
++    guest_output_presentation_cursor_.Reset();
+     const vk::VulkanDevice* dev = provider_->vulkan_device();
+     const auto& dfn = dev->functions();
+     const VkDevice device = dev->device();
+@@ -529,6 +531,7 @@
+     if (pool_) dfn.vkDestroyCommandPool(device, pool_, nullptr);
+     if (swapchain_) dfn.vkDestroySwapchainKHR(device, swapchain_, nullptr);
+     if (surface_) provider_->vulkan_instance()->functions().vkDestroySurfaceKHR(provider_->vulkan_instance()->instance(), surface_, nullptr);
++    guest_output_presentation_cursor_.Reset();
+     provider_ = nullptr;
+ }
+ 
+--- /dev/null
++++ b/gpu/xenos/rexglue/rcomp/guest_output_presentation_cursor.h
+@@ -0,0 +1,30 @@
++// Original R-comp presentation policy. SPDX-License-Identifier: BSD-3-Clause
++#pragma once
++#include <cstdint>
++#include <memory>
++#include <utility>
++namespace rcomp::xenos {
++// CPU-only lifetime tag, unique for one VulkanOutput/presenter lifetime.
++// Keeping a strong reference prevents allocator-address reuse (ABA).
++struct GuestOutputPresentationEpoch {};
++class GuestOutputPresentationCursor {
++public:
++    // The owner serializes access through the presenter's consumer lock.
++    // true means visitor completed a real presentation, never a cache hit.
++    template <typename Visitor>
++    bool PresentIfChanged(const std::shared_ptr<const GuestOutputPresentationEpoch>& epoch,
++                          uint64_t refresh_serial, Visitor&& visitor) {
++        if (!epoch || (epoch_ == epoch && refresh_serial_ == refresh_serial)) return false;
++        if (!std::forward<Visitor>(visitor)()) return false;
++        // Commit only after the visitor's presentation/fence success.
++        epoch_ = epoch;
++        refresh_serial_ = refresh_serial;
++        return true;
++    }
++    // CPU presentation/recreation invalidates the visible output assumption.
++    void Reset() { epoch_.reset(); refresh_serial_ = 0; }
++private:
++    std::shared_ptr<const GuestOutputPresentationEpoch> epoch_;
++    uint64_t refresh_serial_ = 0;
++};
++}  // namespace rcomp::xenos

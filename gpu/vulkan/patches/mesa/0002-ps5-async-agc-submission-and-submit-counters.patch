@@ -1,0 +1,166 @@
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -5,6 +5,9 @@
+  */
+ 
+ #include "radv_ps5_platform.h"
++#include <x86intrin.h>
++/* R-comp diagnostic counters (TSC): 0 calls, 1 words, 2 flush, 3 SubmitDcb, 4 SuspendPoint, 5 claim, 6 copy, 7 cs_submit. */
++__attribute__((visibility("default"))) uint64_t rcomp_radv_submit_stats[8];
+ 
+ #include <assert.h>
+ #include <errno.h>
+@@ -642,22 +645,122 @@
+    *memory = (struct radv_ps5_memory){.physical = -1};
+ }
+ 
++/* AGC submission runs on one helper thread, in order. The suspend point that
++ * follows a submission (R68) blocks for milliseconds while the GPU is busy,
++ * and sceAgcDriverSubmitDcb then blocks behind it; a submitting thread holds
++ * the Vulkan queue for its caller, so that wait serialized every other
++ * submission and presentation behind the GPU. Callers flush their words and
++ * queue them; the helper submits each in queue order and issues a suspend
++ * point whenever the queue drains, so every submission is followed by one
++ * that starts after it. The words stay valid: they belong to the ring until
++ * the GPU has run their sequence, which needs their submission first. An AGC
++ * error is reported by the next submission (the device is then lost). */
++#define RADV_PS5_SUBMIT_JOBS 256u
++struct radv_ps5_submit_job {
++   uint32_t *words;
++   uint32_t count;
++};
++static struct radv_ps5_submit_job radv_ps5_jobs[RADV_PS5_SUBMIT_JOBS];
++static uint32_t radv_ps5_jobs_head, radv_ps5_jobs_tail;
++static int32_t radv_ps5_submit_error;
++static mtx_t radv_ps5_submit_lock;
++static cnd_t radv_ps5_submit_work, radv_ps5_submit_space;
++static bool radv_ps5_submit_async;
++static once_flag radv_ps5_submit_once = ONCE_FLAG_INIT;
++
++static int
++radv_ps5_submit_thread(void *data)
++{
++   (void)data;
++   mtx_lock(&radv_ps5_submit_lock);
++   for (;;) {
++      while (radv_ps5_jobs_head == radv_ps5_jobs_tail)
++         cnd_wait(&radv_ps5_submit_work, &radv_ps5_submit_lock);
++      const struct radv_ps5_submit_job job = radv_ps5_jobs[radv_ps5_jobs_head % RADV_PS5_SUBMIT_JOBS];
++      mtx_unlock(&radv_ps5_submit_lock);
++      struct ps5_agc_submit_description description = {
++         .words = job.words,
++         .word_count = job.count,
++      };
++      const uint64_t t1 = __rdtsc();
++      const int32_t result = sceAgcDriverSubmitDcb(&description);
++      __atomic_fetch_add(&rcomp_radv_submit_stats[3], __rdtsc() - t1, __ATOMIC_RELAXED);
++      if (result != 0)
++         fprintf(stderr, "radv/ps5: sceAgcDriverSubmitDcb failed: 0x%08x\n", (unsigned)result);
++      mtx_lock(&radv_ps5_submit_lock);
++      if (result != 0 && radv_ps5_submit_error == 0)
++         radv_ps5_submit_error = result;
++      radv_ps5_jobs_head++;
++      cnd_broadcast(&radv_ps5_submit_space);
++#ifndef RCOMP_RADV_PS5_SUSPEND_POINTS
++#define RCOMP_RADV_PS5_SUSPEND_POINTS 1
++#endif
++      if (RCOMP_RADV_PS5_SUSPEND_POINTS && radv_ps5_jobs_head == radv_ps5_jobs_tail) {
++         mtx_unlock(&radv_ps5_submit_lock);
++         /* Without the suspend point the console starts a submission up to
++          * a refresh late (PS5_Vulkan R68). */
++         const uint64_t t2 = __rdtsc();
++         const int32_t suspended = sceAgcSuspendPoint();
++         __atomic_fetch_add(&rcomp_radv_submit_stats[4], __rdtsc() - t2, __ATOMIC_RELAXED);
++         if (suspended != 0)
++            fprintf(stderr, "radv/ps5: sceAgcSuspendPoint failed: 0x%08x\n", (unsigned)suspended);
++         mtx_lock(&radv_ps5_submit_lock);
++      }
++   }
++   return 0;
++}
++
++static void
++radv_ps5_submit_start(void)
++{
++   thrd_t thread;
++   if (mtx_init(&radv_ps5_submit_lock, mtx_plain) != thrd_success ||
++       cnd_init(&radv_ps5_submit_work) != thrd_success || cnd_init(&radv_ps5_submit_space) != thrd_success)
++      return;
++   radv_ps5_submit_async = thrd_create(&thread, radv_ps5_submit_thread, NULL) == thrd_success;
++   if (radv_ps5_submit_async)
++      thrd_detach(thread);
++}
++
+ int
+ radv_ps5_submit(uint32_t *words, uint32_t count, volatile uint32_t *marker, uint32_t marker_value)
+ {
+    (void)marker;
+    (void)marker_value;
++   call_once(&radv_ps5_submit_once, radv_ps5_submit_start);
++   uint64_t t0 = __rdtsc();
+    radv_ps5_cpu_flush(words, (size_t)count * sizeof(uint32_t));
++   uint64_t t1 = __rdtsc();
++   __atomic_fetch_add(&rcomp_radv_submit_stats[0], 1, __ATOMIC_RELAXED);
++   __atomic_fetch_add(&rcomp_radv_submit_stats[1], count, __ATOMIC_RELAXED);
++   __atomic_fetch_add(&rcomp_radv_submit_stats[2], t1 - t0, __ATOMIC_RELAXED);
++   if (radv_ps5_submit_async) {
++      mtx_lock(&radv_ps5_submit_lock);
++      int32_t result = radv_ps5_submit_error;
++      if (result == 0) {
++         while (radv_ps5_jobs_tail - radv_ps5_jobs_head == RADV_PS5_SUBMIT_JOBS)
++            cnd_wait(&radv_ps5_submit_space, &radv_ps5_submit_lock);
++         radv_ps5_jobs[radv_ps5_jobs_tail % RADV_PS5_SUBMIT_JOBS] = (struct radv_ps5_submit_job){words, count};
++         radv_ps5_jobs_tail++;
++         cnd_signal(&radv_ps5_submit_work);
++      }
++      mtx_unlock(&radv_ps5_submit_lock);
++      return result;
++   }
+    struct ps5_agc_submit_description description = {
+       .words = words,
+       .word_count = count,
+    };
+    int32_t result = sceAgcDriverSubmitDcb(&description);
++   uint64_t t2 = __rdtsc();
++   __atomic_fetch_add(&rcomp_radv_submit_stats[3], t2 - t1, __ATOMIC_RELAXED);
+    if (result != 0)
+       return result;
+    /* Without the suspend point the console starts a submission up to a
+     * refresh late (PS5_Vulkan R68). */
+-   return sceAgcSuspendPoint();
++   result = sceAgcSuspendPoint();
++   __atomic_fetch_add(&rcomp_radv_submit_stats[4], __rdtsc() - t2, __ATOMIC_RELAXED);
++   return result;
+ }
+ 
+ int
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_cs.c
+@@ -14,6 +14,8 @@
+ #include "util/u_atomic.h"
+ #include "util/u_math.h"
+ #include "sid.h"
++#include <x86intrin.h>
++extern uint64_t rcomp_radv_submit_stats[8];
+ 
+ /* Command streams. The console faults a PM4 INDIRECT_BUFFER into title memory
+  * (PS5_Vulkan B8), so nothing is chained: a stream's words stay in CPU memory,
+@@ -594,7 +596,10 @@
+    }
+ 
+    const uint64_t seq = queue->submitted_seq + 1;
++   const uint64_t rcomp_t0 = __rdtsc();
+    uint32_t *const words = too_large ? NULL : radv_ps5_queue_claim(queue, count, seq);
++   const uint64_t rcomp_t1 = __rdtsc();
++   __atomic_fetch_add(&rcomp_radv_submit_stats[5], rcomp_t1 - rcomp_t0, __ATOMIC_RELAXED);
+    if (!words) {
+       simple_mtx_unlock(&queue->submit_lock);
+       util_dynarray_fini(&pieces);
+@@ -628,6 +633,7 @@
+    util_dynarray_fini(&pieces);
+    util_dynarray_fini(&units);
+ 
++   __atomic_fetch_add(&rcomp_radv_submit_stats[6], __rdtsc() - rcomp_t1, __ATOMIC_RELAXED);
+    p_atomic_set(&queue->submitted_seq, seq);
+    int submitted = 0;
+    const unsigned parts = util_dynarray_num_elements(&starts, uint32_t);

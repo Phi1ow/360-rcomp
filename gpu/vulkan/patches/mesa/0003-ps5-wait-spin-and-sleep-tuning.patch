@@ -1,0 +1,71 @@
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -87,6 +87,44 @@
+ /* Before sleeping, the marker is checked in a loop for this long: most waits
+  * end well inside a millisecond (PS5_Vulkan R36). */
+ #define RADV_PS5_SPIN_NS UINT64_C(1500000)
++/* After the spin the wait sleeps in steps of this many microseconds. */
++#define RADV_PS5_SLEEP_US 1000u
++
++/* R-comp (audit G3, GPU idle gaps): a fence that completes just after a sleep
++ * has started is noticed up to one step late, so the spin length and the sleep
++ * step are tunable without rebuilding the driver: RADV_PS5_WAIT_SPIN_US
++ * (default 1500) and RADV_PS5_WAIT_SLEEP_US (default 1000; 0 keeps spinning).
++ * Read once, at the first wait that does not find its sequence complete. */
++static uint64_t radv_ps5_wait_spin_ns = RADV_PS5_SPIN_NS;
++static unsigned radv_ps5_wait_sleep_us = RADV_PS5_SLEEP_US;
++static once_flag radv_ps5_wait_once = ONCE_FLAG_INIT;
++
++static bool
++radv_ps5_env_unsigned(const char *name, unsigned max, unsigned *value)
++{
++   const char *const text = getenv(name);
++   if (!text || !*text)
++      return false;
++   char *end = NULL;
++   const unsigned long parsed = strtoul(text, &end, 10);
++   if (*end || parsed > max)
++      return false;
++   *value = (unsigned)parsed;
++   return true;
++}
++
++static void
++radv_ps5_wait_tuning_init(void)
++{
++   unsigned value;
++   if (radv_ps5_env_unsigned("RADV_PS5_WAIT_SPIN_US", 100000, &value))
++      radv_ps5_wait_spin_ns = (uint64_t)value * 1000;
++   if (radv_ps5_env_unsigned("RADV_PS5_WAIT_SLEEP_US", 100000, &value))
++      radv_ps5_wait_sleep_us = value;
++   if (radv_ps5_wait_spin_ns != RADV_PS5_SPIN_NS || radv_ps5_wait_sleep_us != RADV_PS5_SLEEP_US)
++      fprintf(stderr, "radv/ps5: wait spin %" PRIu64 " us, sleep step %u us\n", radv_ps5_wait_spin_ns / 1000,
++              radv_ps5_wait_sleep_us);
++}
+ 
+ bool
+ radv_ps5_queue_wait_seq(struct radv_ps5_queue *queue, uint64_t seq, uint64_t abs_timeout_ns)
+@@ -94,8 +132,9 @@
+    uint64_t completed = radv_ps5_queue_poll(queue);
+    if (completed >= seq)
+       return true;
++   call_once(&radv_ps5_wait_once, radv_ps5_wait_tuning_init);
+    uint64_t now = os_time_get_nano();
+-   const uint64_t spin_until = now + RADV_PS5_SPIN_NS;
++   const uint64_t spin_until = now + radv_ps5_wait_spin_ns;
+    uint64_t progress_at = now;
+    uint64_t last = completed;
+    for (;;) {
+@@ -113,10 +152,10 @@
+                  completed, (unsigned)(RADV_PS5_STALL_NS / 1000000000));
+          return false;
+       }
+-      if (now < spin_until)
++      if (now < spin_until || radv_ps5_wait_sleep_us == 0)
+          __builtin_ia32_pause();
+       else
+-         radv_ps5_sleep_us(1000);
++         radv_ps5_sleep_us(radv_ps5_wait_sleep_us);
+    }
+ }
+ 

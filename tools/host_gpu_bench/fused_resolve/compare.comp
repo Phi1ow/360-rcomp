@@ -1,0 +1,26 @@
+#version 450
+// Word-by-word comparison of two buffers on the GPU: result[0] = number of differing words, result[1] = lowest differing word index, result[2] = number of non-zero words in a,
+// result[3] = number of differing words that are NaN (as 32-bit floats) in both buffers: only the payload of a NaN differs.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, set = 0, binding = 2) buffer Result { uint result[4]; };
+layout(push_constant) uniform PushConstants { uint words; } pc;
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.words) {
+    return;
+  }
+  uint x = a[i];
+  if (x != 0u) {
+    atomicAdd(result[2], 1u);
+  }
+  uint y = b[i];
+  if (x != y) {
+    atomicAdd(result[0], 1u);
+    atomicMin(result[1], i);
+    if ((x & 0x7F800000u) == 0x7F800000u && (x & 0x007FFFFFu) != 0u && (y & 0x7F800000u) == 0x7F800000u && (y & 0x007FFFFFu) != 0u) {
+      atomicAdd(result[3], 1u);
+    }
+  }
+}

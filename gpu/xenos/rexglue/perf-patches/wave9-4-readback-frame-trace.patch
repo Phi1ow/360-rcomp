@@ -1,0 +1,90 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -80,7 +80,18 @@
+                     "Read back resolution-scaled resolves with R-comp's downscale (bounded binding, the resolve shaders' scaled layout)")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++// R-comp diagnostic: log every resolve read-back (with its source surface, RCOMP-READBACK-SOURCE, and data statistics) of the frames
++// [first, first + count): with readback_resolve=full and no byte limit, the whole resolve sequence of a frame, to compare two render paths.
++REXCVAR_DEFINE_INT32(rcomp_readback_trace_first_frame, -1, "GPU/Vulkan",
++                     "DIAGNOSTIC: first frame whose resolve read-backs are all logged (-1 = off)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(rcomp_readback_trace_frames, 2, "GPU/Vulkan",
++                     "DIAGNOSTIC: number of frames logged from rcomp_readback_trace_first_frame")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace {
++// Draws issued (IssueDraw calls), for the draws_since field of the traced read-backs; the command processor thread only.
++uint64_t rcomp_trace_draw_counter = 0;
+ // Set when the R-comp downscale pipeline replaced the SDK's (one command processor per title).
+ bool rcomp_readback_downscale_fixed = false;
+ // Push constants: the SDK's ResolveDownscaleConstants, tile_count carrying the number of 32-bit words to write.
+@@ -4167,6 +4178,7 @@
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                        IndexBufferInfo* index_buffer_info,
+                                        bool major_mode_explicit) {
++  ++rcomp_trace_draw_counter;
+   if (skip_gpu_work_) {
+     return true;
+   }
+@@ -5432,9 +5444,45 @@
+     return true;
+   }
+   ++rcomp_readbacks;
+-  // The first 32 read-backs, then every 64th (with their data statistics, see RCOMP-READBACK-DATA).
+-  const bool rcomp_readback_logged = rcomp_readbacks <= 32 || (rcomp_readbacks & 63) == 0;
++  // The first 32 read-backs, then every 64th (with their data statistics, see RCOMP-READBACK-DATA), and every read-back of
++  // the frames [rcomp_readback_trace_first_frame, + rcomp_readback_trace_frames) with the copied surface (RCOMP-READBACK-SOURCE).
++  static const int32_t rcomp_trace_first_frame = REXCVAR_GET(rcomp_readback_trace_first_frame);
++  static const int32_t rcomp_trace_frames = REXCVAR_GET(rcomp_readback_trace_frames);
++  const bool rcomp_readback_traced = rcomp_trace_first_frame >= 0 &&
++                                     frame_current_ >= uint64_t(rcomp_trace_first_frame) &&
++                                     frame_current_ < uint64_t(rcomp_trace_first_frame) + uint64_t(std::max(rcomp_trace_frames, 0));
++  const bool rcomp_readback_logged =
++      rcomp_readbacks <= 32 || (rcomp_readbacks & 63) == 0 || rcomp_readback_traced;
+   const auto rcomp_log_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
++  if (rcomp_readback_traced) {
++    // The surface the resolve copied (the registers still hold the resolve's state): source select (0-3 color, 4 depth), its EDRAM base and
++    // format, the surface pitch and MSAA, the copy's sample select and exponent bias, and the draws issued since the previous traced resolve.
++    static uint64_t rcomp_traced_previous_draws = 0;
++    const auto copy_control = register_file_->Get<reg::RB_COPY_CONTROL>();
++    const auto surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
++    const uint32_t source = uint32_t(copy_control.copy_src_select);
++    uint32_t source_base, source_format;
++    if (source < xenos::kMaxColorRenderTargets) {
++      const auto color_info =
++          register_file_->Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[source]);
++      source_base = color_info.color_base;
++      source_format = uint32_t(color_info.color_format);
++    } else {
++      const auto depth_info = register_file_->Get<reg::RB_DEPTH_INFO>();
++      source_base = depth_info.depth_base;
++      source_format = uint32_t(depth_info.depth_format);
++    }
++    std::fprintf(stderr,
++                 "RCOMP-READBACK-SOURCE n=%llu frame=%llu address=0x%08X src=%u base=%u rf=%u pitch=%u msaa=%u "
++                 "sample_select=%u exp_bias=%d clear_color=%u clear_depth=%u draws_since=%llu\n",
++                 (unsigned long long)(rcomp_readbacks), (unsigned long long)frame_current_, written_address,
++                 source, source_base, source_format, unsigned(surface_info.surface_pitch),
++                 unsigned(surface_info.msaa_samples), unsigned(copy_control.copy_sample_select),
++                 int(rcomp_log_dest_info.copy_dest_exp_bias), unsigned(copy_control.color_clear_enable),
++                 unsigned(copy_control.depth_clear_enable),
++                 (unsigned long long)(rcomp_trace_draw_counter - rcomp_traced_previous_draws));
++    rcomp_traced_previous_draws = rcomp_trace_draw_counter;
++  }
+   if (rcomp_readback_logged) {
+     const auto log_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
+     std::fprintf(stderr,
+@@ -5750,7 +5798,11 @@
+           const uint32_t pixels = written_length >> 2;
+           for (uint32_t i = 0; i < pixels; ++i) {
+             const uint8_t* p = destination + i * 4;
+-            const uint32_t big = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
++            // The packed value: big-endian words for an 8-in-32 swapped destination (endian 2), host order without a swap (endian 0).
++            const uint32_t big =
++                rcomp_log_dest_info.copy_dest_endian == xenos::Endian128::kNone
++                    ? (uint32_t(p[3]) << 24) | (uint32_t(p[2]) << 16) | (uint32_t(p[1]) << 8) | p[0]
++                    : (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+             if (is_2_10_10_10) {
+               for (uint32_t c = 0; c < 3; ++c) {
+                 sums[c] += double((big >> (10 * c)) & 1023) * (1.0 / 1023.0);

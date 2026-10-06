@@ -1,0 +1,675 @@
+diff -ruN a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -43,6 +43,7 @@
+ REXCVAR_DECLARE(bool, snorm16_render_target_full_range);
+ REXCVAR_DECLARE(bool, mrt_edram_used_range_clamp_to_min);
+ REXCVAR_DECLARE(bool, direct_host_resolve);
++REXCVAR_DECLARE(bool, rcomp_elide_overwritten_transfers);
+ 
+ // GPU Textures
+ REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
+diff -ruN a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -171,8 +171,14 @@
+ 
+   virtual void BeginFrame();
+ 
++  // `depth_stencil_overwrite_candidate` (R-comp) is set by the caller for a draw whose state overwrites
++  // every bit of depth and stencil wherever it is rasterized (a clear drawn as a rectangle list: depth
++  // and stencil always written, nothing culled, no pixel shader): Update then finds the rectangle the
++  // draw covers, and the ownership transfers into the part of the depth render target inside it, whose
++  // contents the draw replaces, are not generated.
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+-                      uint32_t normalized_color_mask, const Shader& vertex_shader);
++                      uint32_t normalized_color_mask, const Shader& vertex_shader,
++                      bool depth_stencil_overwrite_candidate = false);
+ 
+   // Returns bits where 0 is whether a depth render target is currently bound on
+   // the host and 1... are whether the same applies to color render targets, and
+@@ -187,6 +193,14 @@
+     uint32_t key = 0, base = 0, length = 0;
+   };
+   RcompClaim rcomp_last_claims_[1 + xenos::kMaxColorRenderTargets];
++  // The rectangle (guest pixels, x0 y0 x1 y1) of the last Update's depth/stencil overwrite, if any.
++  bool rcomp_last_overwrite_valid_ = false;
++  int32_t rcomp_last_overwrite_[4] = {};
++  // What the estimator said for the last candidate draw: -1 not asked, 0 not a rectangle, 1 bounds.
++  int rcomp_last_estimate_state_ = -1;
++  float rcomp_last_estimate_bounds_[4] = {};
++  int rcomp_last_estimate_refusal_ = 0;
++  float rcomp_last_estimate_positions_[4][3] = {};
+ #endif
+ 
+  protected:
+@@ -343,9 +357,16 @@
+     uint32_t GetRectangles(uint32_t base_tiles, uint32_t pitch_tiles,
+                            xenos::MsaaSamples msaa_samples, bool is_64bpp,
+                            Rectangle* rectangles_out, const Rectangle* cutout = nullptr) const {
++      // R-comp: without a resolve clear cutout, the part of the destination the draw that requested
++      // the transfer overwrites entirely is cut out (see RenderTargetCache::Update).
++      if (!cutout && has_overwrite_cutout) {
++        cutout = &overwrite_cutout;
++      }
+       return GetRangeRectangles(start_tiles, end_tiles, base_tiles, pitch_tiles, msaa_samples,
+                                 is_64bpp, rectangles_out, cutout);
+     }
++    bool has_overwrite_cutout = false;
++    Rectangle overwrite_cutout = {};
+     bool AreSourcesSame(const Transfer& other_transfer) const {
+       return source == other_transfer.source &&
+              host_depth_source == other_transfer.host_depth_source;
+@@ -656,7 +677,8 @@
+   // change to transfers_append_out if it's not null.
+   void ChangeOwnership(RenderTargetKey dest, uint32_t start_tiles_base_relative,
+                        uint32_t length_tiles, std::vector<Transfer>* transfers_append_out,
+-                       const Transfer::Rectangle* resolve_clear_cutout = nullptr);
++                       const Transfer::Rectangle* resolve_clear_cutout = nullptr,
++                       const Transfer::Rectangle* overwrite_cutout = nullptr);
+ 
+   // If failed to create, may contain nullptr to prevent attempting to create a
+   // render target twice.
+diff -ruN a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -31,6 +31,22 @@
+   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
+   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y, const Shader& vertex_shader);
+ 
++  // R-comp: for a draw of one rectangle list (three guest vertices), executes the vertex shader on the
++  // CPU and returns the axis-aligned rectangle the draw covers, in screen pixels in the convention of
++  // the host (pixel p covers [p, p + 1), the window offset and the Direct3D half-pixel offset applied):
++  // {min x, min y, max x, max y}. Returns false if the draw is not such a rectangle (more or fewer
++  // vertices, a shader that can't be interpreted, a vertex that is killed, positions that are not
++  // finite or not the four corners of an axis-aligned rectangle). The shader must have its ucode
++  // analyzed.
++  bool EstimateRectangleListBounds(const Shader& vertex_shader, float bounds_out[4]);
++  // Why the last EstimateRectangleListBounds said no (0 = it did not): 1 not three vertices of a
++  // rectangle list, 2 immediate indices, 3 tessellation, 4 primitive reset, 5 shader not
++  // interpretable, 6 no index buffer, 7 vertex killed or position x/y not exported, 8 position w not
++  // exported, 9 w is zero, 10 not finite, 11 too small, 12 not the corners of an axis-aligned
++  // rectangle. The clip-space (x, y, w) of the three guest vertices and the synthetic fourth.
++  int last_rectangle_refusal() const { return last_rectangle_refusal_; }
++  const float (&last_rectangle_positions() const)[4][3] { return last_rectangle_positions_; }
++
+  private:
+   class PositionYExportSink : public ShaderInterpreter::ExportSink {
+    public:
+@@ -38,23 +54,29 @@
+                 uint32_t value_mask) override;
+ 
+     void Reset() {
++      position_x_.reset();
+       position_y_.reset();
+       position_w_.reset();
+       point_size_.reset();
+       vertex_kill_.reset();
+     }
+ 
++    const std::optional<float>& position_x() const { return position_x_; }
+     const std::optional<float>& position_y() const { return position_y_; }
+     const std::optional<float>& position_w() const { return position_w_; }
+     const std::optional<float>& point_size() const { return point_size_; }
+     const std::optional<uint32_t>& vertex_kill() const { return vertex_kill_; }
+ 
+    private:
++    std::optional<float> position_x_;
+     std::optional<float> position_y_;
+     std::optional<float> position_w_;
+     std::optional<float> point_size_;
+     std::optional<uint32_t> vertex_kill_;
+   };
++
++  int last_rectangle_refusal_ = 0;
++  float last_rectangle_positions_[4][3] = {};
+ 
+   const RegisterFile& register_file_;
+   const memory::Memory& memory_;
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -237,6 +237,17 @@
+     uint32_t flags;           // see rcomp_draw_flags
+     int32_t scissor[4];       // left, top, right, bottom (guest pixels)
+     int32_t viewport[4];      // x offset, y offset, x extent, y extent (guest pixels)
++    bool overwrite_valid;     // the draw overwrote the depth and stencil in overwrite[] (x0 y0 x1 y1)
++    int32_t overwrite[4];
++    // Rectangle list draws without a pixel shader: the state that decides whether they overwrite
++    // the depth and stencil, whether they were taken for candidates, and what the estimator found.
++    bool has_state;
++    bool candidate;
++    int estimate_state;
++    float estimate_bounds[4];
++    int estimate_refusal;
++    float estimate_positions[4][3];
++    uint32_t state_registers[8];  // depth control, stencil ref/mask front and back, mode, clip, vte, vtx, window offset
+   };
+   void RcompDrawEvent(const RcompDrawEventInfo& info);
+   // Closes the draw run being summarised (before another kind of event is written).
+diff -ruN a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -110,7 +110,8 @@
+                uint32_t& written_length_out);
+ 
+   bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+-              uint32_t normalized_color_mask, const Shader& vertex_shader) override;
++              uint32_t normalized_color_mask, const Shader& vertex_shader,
++              bool depth_stencil_overwrite_candidate = false) override;
+   // Binding information for the last successful update.
+   RenderPassKey last_update_render_pass_key() const { return last_update_render_pass_key_; }
+   VkRenderPass last_update_render_pass() const { return last_update_render_pass_; }
+diff -ruN a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -30,6 +30,11 @@
+ 
+ REXCVAR_DEFINE_BOOL(mrt_edram_used_range_clamp_to_min, true, "GPU",
+                     "Clamp MRT EDRAM used range to minimum");
++
++// R-comp: see RenderTargetCache::Update. The ownership transfers into the part of a depth render
++// target that a clearing rectangle draw replaces are skipped.
++REXCVAR_DEFINE_BOOL(rcomp_elide_overwritten_transfers, false, "GPU",
++                    "Skip ownership transfers into the depth and stencil area a clear draw overwrites");
+ 
+ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, true, "GPU",
+                     "Execute unclipped draw VS on CPU for PSI render backend");
+@@ -399,7 +404,8 @@
+ 
+ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+-                               uint32_t normalized_color_mask, const Shader& vertex_shader) {
++                               uint32_t normalized_color_mask, const Shader& vertex_shader,
++                               bool depth_stencil_overwrite_candidate) {
+   const RegisterFile& regs = register_file();
+   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
+ 
+@@ -698,12 +704,68 @@
+     rcomp_last_claims_[slot].base = rt_keys[slot].base_tiles;
+     rcomp_last_claims_[slot].length = rt_lengths_tiles[i];
+   }
++  rcomp_last_overwrite_valid_ = false;
++  rcomp_last_estimate_state_ = -1;
+ #endif
++  // A clear drawn as a rectangle list replaces everything in the depth and stencil of the rectangle:
++  // what the render targets already held there does not have to be transferred. The rectangle is
++  // shrunk to the pixels that are surely covered entirely (the vertex positions are rounded inwards
++  // with a margin of 1/16 of a pixel, which no sample position of 1x, 2x and 4x MSAA falls into) and
++  // clipped by the scissor.
++  Transfer::Rectangle depth_overwrite_cutout;
++  bool depth_overwrite_cutout_valid = false;
++  if (depth_stencil_overwrite_candidate && !interlock_barrier_only &&
++      (depth_and_color_rts_used_bits & 1) && REXCVAR_GET(rcomp_elide_overwritten_transfers)) {
++    float bounds[4];
++    const bool bounds_valid = draw_extent_estimator_.EstimateRectangleListBounds(vertex_shader, bounds);
++#if RCOMP_XENOS_PROFILE_TIMINGS
++    rcomp_last_estimate_state_ = bounds_valid ? 1 : 0;
++    if (bounds_valid) {
++      for (uint32_t k = 0; k < 4; ++k) rcomp_last_estimate_bounds_[k] = bounds[k];
++    }
++    rcomp_last_estimate_refusal_ = draw_extent_estimator_.last_rectangle_refusal();
++    for (uint32_t i = 0; i < 4; ++i) {
++      for (uint32_t k = 0; k < 3; ++k) {
++        rcomp_last_estimate_positions_[i][k] = draw_extent_estimator_.last_rectangle_positions()[i][k];
++      }
++    }
++#endif
++    if (bounds_valid) {
++      constexpr float kMargin = 1.0f / 16.0f;
++      draw_util::Scissor scissor;
++      draw_util::GetScissor(regs, scissor);
++      int32_t x0 = std::max(int32_t(std::ceil(bounds[0] - kMargin)), int32_t(scissor.offset[0]));
++      int32_t y0 = std::max(int32_t(std::ceil(bounds[1] - kMargin)), int32_t(scissor.offset[1]));
++      int32_t x1 = std::min(int32_t(std::floor(bounds[2] + kMargin)),
++                            int32_t(scissor.offset[0] + scissor.extent[0]));
++      int32_t y1 = std::min(int32_t(std::floor(bounds[3] + kMargin)),
++                            int32_t(scissor.offset[1] + scissor.extent[1]));
++      x0 = std::max(x0, int32_t(0));
++      y0 = std::max(y0, int32_t(0));
++      if (x1 > x0 && y1 > y0) {
++        depth_overwrite_cutout.x_pixels = uint32_t(x0);
++        depth_overwrite_cutout.y_pixels = uint32_t(y0);
++        depth_overwrite_cutout.width_pixels = uint32_t(x1 - x0);
++        depth_overwrite_cutout.height_pixels = uint32_t(y1 - y0);
++        depth_overwrite_cutout_valid = true;
++#if RCOMP_XENOS_PROFILE_TIMINGS
++        rcomp_last_overwrite_valid_ = true;
++        rcomp_last_overwrite_[0] = x0;
++        rcomp_last_overwrite_[1] = y0;
++        rcomp_last_overwrite_[2] = x1;
++        rcomp_last_overwrite_[3] = y1;
++#endif
++      }
++    }
++  }
+   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
+     uint32_t rt_bit_index = rt_base_index.second;
+     ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
+-                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
++                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
++                    nullptr,
++                    (rt_bit_index == 0 && depth_overwrite_cutout_valid) ? &depth_overwrite_cutout
++                                                                        : nullptr);
+   }
+ 
+   if (interlock_barrier_only) {
+@@ -1256,7 +1318,8 @@
+ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_tiles_base_relative,
+                                         uint32_t length_tiles,
+                                         std::vector<Transfer>* transfers_append_out,
+-                                        const Transfer::Rectangle* resolve_clear_cutout) {
++                                        const Transfer::Rectangle* resolve_clear_cutout,
++                                        const Transfer::Rectangle* overwrite_cutout) {
+   // xenos::kEdramTileCount with length 0 is fine if both the start and the end
+   // are clamped to xenos::kEdramTileCount.
+   assert_true(start_tiles_base_relative <= (xenos::kEdramTileCount - uint32_t(length_tiles != 0)));
+@@ -1312,10 +1375,12 @@
+         // be different than the destination.
+         if (!transfer_source.IsEmpty() && transfer_source != dest) {
+           uint32_t transfer_end_tiles = std::min(it->second.end_tiles, extent_end);
+-          if (!resolve_clear_cutout ||
++          const Transfer::Rectangle* const skipped_cutout =
++              resolve_clear_cutout ? resolve_clear_cutout : overwrite_cutout;
++          if (!skipped_cutout ||
+               Transfer::GetRangeRectangles(it->first, transfer_end_tiles, dest.base_tiles,
+                                            dest_pitch_tiles, dest.msaa_samples, dest_is_64bpp,
+-                                           nullptr, resolve_clear_cutout)) {
++                                           nullptr, skipped_cutout)) {
+             RenderTargetKey transfer_host_depth_source =
+                 host_depth_encoding_different
+                     ? it->second.GetHostDepthRenderTarget(dest.GetDepthFormat())
+@@ -1352,6 +1417,10 @@
+                       transfer_host_depth_source_rt_it != render_targets_.end()
+                           ? transfer_host_depth_source_rt_it->second
+                           : nullptr);
++                  if (overwrite_cutout && !resolve_clear_cutout) {
++                    transfers_append_out->back().has_overwrite_cutout = true;
++                    transfers_append_out->back().overwrite_cutout = *overwrite_cutout;
++                  }
+                 }
+               }
+             }
+diff -ruN a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cfloat>
++#include <cmath>
+ #include <cstdint>
+ 
+ #include <rex/assert.h>
+@@ -65,6 +66,9 @@
+ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister export_register,
+                                                       const float* value, uint32_t value_mask) {
+   if (export_register == ucode::ExportRegister::kVSPosition) {
++    if (value_mask & 0b0001) {
++      position_x_ = value[0];
++    }
+     if (value_mask & 0b0010) {
+       position_y_ = value[1];
+     }
+@@ -251,6 +255,213 @@
+   return (uint32_t(std::max(int32_t(0), max_y_24p8)) +
+           ((rb_surface_info.msaa_samples == xenos::MsaaSamples::k1X) ? 127 : 255)) >>
+          8;
++}
++
++bool DrawExtentEstimator::EstimateRectangleListBounds(const Shader& vertex_shader,
++                                                      float bounds_out[4]) {
++  const RegisterFile& regs = register_file_;
++
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  last_rectangle_refusal_ = 0;
++  if (vgt_draw_initiator.prim_type != xenos::PrimitiveType::kRectangleList ||
++      vgt_draw_initiator.num_indices != 3) {
++    last_rectangle_refusal_ = 1;
++    return false;
++  }
++  if (vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA &&
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
++    last_rectangle_refusal_ = 2;
++    return false;
++  }
++  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type) &&
++      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
++          xenos::VGTOutputPath::kTessellationEnable) {
++    last_rectangle_refusal_ = 3;
++    return false;
++  }
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_su_sc_mode_cntl.multi_prim_ib_ena) {
++    // Primitive reset indices would change which vertices form the rectangle.
++    last_rectangle_refusal_ = 4;
++    return false;
++  }
++  assert_true(vertex_shader.type() == xenos::ShaderType::kVertex);
++  assert_true(vertex_shader.is_ucode_analyzed());
++  if (!ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    last_rectangle_refusal_ = 5;
++    return false;
++  }
++
++  auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
++  union {
++    const void* index_buffer;
++    const uint16_t* index_buffer_16;
++    const uint32_t* index_buffer_32;
++  };
++  index_buffer = nullptr;
++  xenos::Endian index_endian = vgt_dma_size.swap_mode;
++  if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
++    uint32_t index_buffer_base = regs[XE_GPU_REG_VGT_DMA_BASE];
++    if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
++      // The same endianness handling as in EstimateVertexMaxY and the PrimitiveProcessor.
++      if (index_endian == xenos::Endian::k8in32) {
++        index_endian = xenos::Endian::k8in16;
++      } else if (index_endian == xenos::Endian::k16in32) {
++        index_endian = xenos::Endian::kNone;
++      }
++      index_buffer_base &= ~uint32_t(sizeof(uint16_t) - 1);
++    } else {
++      assert_true(vgt_draw_initiator.index_size == xenos::IndexFormat::kInt32);
++      index_buffer_base &= ~uint32_t(sizeof(uint32_t) - 1);
++    }
++    index_buffer = memory_.TranslatePhysical(index_buffer_base);
++    if (!index_buffer) {
++      last_rectangle_refusal_ = 6;
++      return false;
++    }
++  }
++  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++
++  // Clip-space position (x, y, w) of the three guest vertices; the host synthesizes the fourth as
++  // position 1 - position 0 + position 2 (see the rectangle list handling in the SPIR-V translator).
++  float position[4][3];
++  shader_interpreter_.SetShader(vertex_shader);
++  PositionYExportSink export_sink;
++  shader_interpreter_.SetExportSink(&export_sink);
++  bool valid = true;
++  for (uint32_t i = 0; i < 3 && valid; ++i) {
++    uint32_t vertex_index;
++    if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
++      if (i < vgt_dma_size.num_words) {
++        if (vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16) {
++          vertex_index = index_buffer_16[i];
++        } else {
++          vertex_index = index_buffer_32[i];
++        }
++        vertex_index = xenos::GpuSwap(vertex_index, index_endian) & 0xFFFFFF;
++      } else {
++        vertex_index = 0;
++      }
++    } else {
++      vertex_index = i;
++    }
++    vertex_index =
++        std::min(max_index, std::max(min_index, (vertex_index + index_offset) & 0xFFFFFF));
++    export_sink.Reset();
++    shader_interpreter_.temp_registers()[0] = float(vertex_index);
++    shader_interpreter_.Execute();
++    if ((export_sink.vertex_kill().has_value() &&
++         (export_sink.vertex_kill().value() & ~(UINT32_C(1) << 31))) ||
++        !export_sink.position_x().has_value() || !export_sink.position_y().has_value()) {
++      last_rectangle_refusal_ = 7;
++      valid = false;
++      break;
++    }
++    if (!export_sink.position_w().has_value() && !regs.Get<reg::PA_CL_VTE_CNTL>().vtx_xy_fmt) {
++      last_rectangle_refusal_ = 8;
++      valid = false;
++      break;
++    }
++    position[i][0] = export_sink.position_x().value();
++    position[i][1] = export_sink.position_y().value();
++    position[i][2] = export_sink.position_w().has_value() ? export_sink.position_w().value() : 1.0f;
++  }
++  shader_interpreter_.SetExportSink(nullptr);
++  if (!valid) {
++    return false;
++  }
++  for (uint32_t k = 0; k < 3; ++k) {
++    position[3][k] = position[1][k] - position[0][k] + position[2][k];
++  }
++  for (uint32_t i = 0; i < 4; ++i) {
++    for (uint32_t k = 0; k < 3; ++k) {
++      last_rectangle_positions_[i][k] = position[i][k];
++    }
++  }
++
++  // The same transformation as for the Y of EstimateVertexMaxY, now for both axes.
++  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  float scale_x = pa_cl_vte_cntl.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f;
++  float offset_x =
++      pa_cl_vte_cntl.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f;
++  float scale_y = pa_cl_vte_cntl.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f;
++  float offset_y =
++      pa_cl_vte_cntl.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f;
++  // For Direct3D 9 pixel centers (the pixel center is at the integer coordinate), 0.5 must be added to
++  // get the coordinates of the pixel corners (see xenos.h, "Direct3D 9 does resolving ...").
++  float half_pixel = regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero ? 0.5f : 0.0f;
++  float window_x = 0.0f, window_y = 0.0f;
++  if (pa_su_sc_mode_cntl.vtx_window_offset_enable) {
++    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    window_x = float(int32_t(pa_sc_window_offset.window_x_offset));
++    window_y = float(int32_t(pa_sc_window_offset.window_y_offset));
++  }
++  float xs[4], ys[4];
++  for (uint32_t i = 0; i < 4; ++i) {
++    float x = position[i][0];
++    float y = position[i][1];
++    if (!pa_cl_vte_cntl.vtx_xy_fmt) {
++      float w = position[i][2];
++      if (!(w != 0.0f)) {
++        last_rectangle_refusal_ = 9;
++        return false;
++      }
++      x /= w;
++      y /= w;
++    }
++    x = x * scale_x + offset_x + half_pixel + window_x;
++    y = y * scale_y + offset_y + half_pixel + window_y;
++    if (!std::isfinite(x) || !std::isfinite(y)) {
++      last_rectangle_refusal_ = 10;
++      return false;
++    }
++    xs[i] = x;
++    ys[i] = y;
++  }
++  float min_x = std::min(std::min(xs[0], xs[1]), std::min(xs[2], xs[3]));
++  float max_x = std::max(std::max(xs[0], xs[1]), std::max(xs[2], xs[3]));
++  float min_y = std::min(std::min(ys[0], ys[1]), std::min(ys[2], ys[3]));
++  float max_y = std::max(std::max(ys[0], ys[1]), std::max(ys[2], ys[3]));
++  if (!(max_x - min_x >= 1.0f) || !(max_y - min_y >= 1.0f)) {
++    last_rectangle_refusal_ = 11;
++    return false;
++  }
++  // The four vertices must be the four distinct corners of that rectangle (positions are exact for
++  // the screen-space rectangles Direct3D 9 draws; the tolerance covers float rounding of the
++  // viewport transformation only).
++  constexpr float kTolerance = 1.0f / 256.0f;
++  bool corner_seen[2][2] = {};
++  for (uint32_t i = 0; i < 4; ++i) {
++    int cx, cy;
++    if (std::abs(xs[i] - min_x) <= kTolerance) {
++      cx = 0;
++    } else if (std::abs(xs[i] - max_x) <= kTolerance) {
++      cx = 1;
++    } else {
++      last_rectangle_refusal_ = 12;
++      return false;
++    }
++    if (std::abs(ys[i] - min_y) <= kTolerance) {
++      cy = 0;
++    } else if (std::abs(ys[i] - max_y) <= kTolerance) {
++      cy = 1;
++    } else {
++      last_rectangle_refusal_ = 12;
++      return false;
++    }
++    if (corner_seen[cy][cx]) {
++      last_rectangle_refusal_ = 12;
++      return false;
++    }
++    corner_seen[cy][cx] = true;
++  }
++  bounds_out[0] = min_x;
++  bounds_out[1] = min_y;
++  bounds_out[2] = max_x;
++  bounds_out[3] = max_y;
++  return true;
+ }
+ 
+ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3646,6 +3646,50 @@
+ namespace { inline void RcompDrawReason(unsigned) {} }
+ #endif
+ 
++namespace {
++// Whether the state of a draw makes it overwrite every bit of depth and stencil wherever it is
++// rasterized (see RenderTargetCache::Update): one rectangle of three guest vertices, drawn without a
++// pixel shader, with the depth test always passing and depth written, the stencil always replaced in
++// all bits, and nothing culled or clipped (the host would otherwise not draw all of it).
++bool IsDepthStencilOverwritingRectangle(const RegisterFile& regs, xenos::PrimitiveType prim_type,
++                                        uint32_t index_count, bool has_pixel_shader,
++                                        const reg::RB_DEPTHCONTROL& depth_control,
++                                        bool depth_clamp_available) {
++  if (prim_type != xenos::PrimitiveType::kRectangleList || index_count != 3 || has_pixel_shader ||
++      !depth_clamp_available) {
++    return false;
++  }
++  if (!depth_control.z_enable || !depth_control.z_write_enable ||
++      depth_control.zfunc != xenos::CompareFunction::kAlways || !depth_control.stencil_enable) {
++    return false;
++  }
++  // Both the stencil and the depth test always pass, so only the pass operation is applied.
++  const auto stencil_replaced = [](xenos::CompareFunction function, xenos::StencilOp pass,
++                                   uint32_t write_mask) {
++    return function == xenos::CompareFunction::kAlways &&
++           (pass == xenos::StencilOp::kReplace || pass == xenos::StencilOp::kZero) &&
++           write_mask == 0xFF;
++  };
++  if (!stencil_replaced(depth_control.stencilfunc, depth_control.stencilzpass,
++                        regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask)) {
++    return false;
++  }
++  if (depth_control.backface_enable &&
++      !stencil_replaced(depth_control.stencilfunc_bf, depth_control.stencilzpass_bf,
++                        regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF)
++                            .stencilwritemask)) {
++    return false;
++  }
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_su_sc_mode_cntl.cull_front || pa_su_sc_mode_cntl.cull_back ||
++      pa_su_sc_mode_cntl.poly_mode == xenos::PolygonModeEnable::kDualMode) {
++    return false;
++  }
++  // With clipping disabled the user clip planes are not applied either (see the system constants).
++  return regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable != 0;
++}
++}  // namespace
++
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                        IndexBufferInfo* index_buffer_info,
+                                        bool major_mode_explicit) {
+@@ -3914,8 +3958,13 @@
+   // Set up the render targets - this may perform dispatches and draws.
+   {
+     RcompProfScope rcomp_prof_render_targets(32);
++    const bool depth_stencil_overwrite_candidate =
++        REXCVAR_GET(rcomp_elide_overwritten_transfers) &&
++        IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
++                                           normalized_depth_control, device_properties.depthClamp);
+     if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+-                                      normalized_color_mask, *vertex_shader)) {
++                                      normalized_color_mask, *vertex_shader,
++                                      depth_stencil_overwrite_candidate)) {
+       return draw_fail("render_target_update");
+     }
+   }
+@@ -4463,6 +4512,33 @@
+     info.viewport[1] = int32_t(viewport_info.xy_offset[1] / draw_resolution_scale_y);
+     info.viewport[2] = int32_t(viewport_info.xy_extent[0] / draw_resolution_scale_x);
+     info.viewport[3] = int32_t(viewport_info.xy_extent[1] / draw_resolution_scale_y);
++    info.overwrite_valid = render_target_cache_->rcomp_last_overwrite_valid_;
++    for (uint32_t i = 0; i < 4; ++i) {
++      info.overwrite[i] = render_target_cache_->rcomp_last_overwrite_[i];
++    }
++    if ((flags & kRectList) && (flags & kNoPixelShader)) {
++      info.has_state = true;
++      info.candidate = IsDepthStencilOverwritingRectangle(regs, prim_type, index_count, pixel_shader != nullptr,
++                                                          normalized_depth_control, device_properties.depthClamp);
++      info.estimate_state = render_target_cache_->rcomp_last_estimate_state_;
++      info.estimate_refusal = render_target_cache_->rcomp_last_estimate_refusal_;
++      for (uint32_t i = 0; i < 4; ++i) {
++        for (uint32_t k = 0; k < 3; ++k) {
++          info.estimate_positions[i][k] = render_target_cache_->rcomp_last_estimate_positions_[i][k];
++        }
++      }
++      for (uint32_t i = 0; i < 4; ++i) {
++        info.estimate_bounds[i] = render_target_cache_->rcomp_last_estimate_bounds_[i];
++      }
++      info.state_registers[0] = regs.Get<reg::RB_DEPTHCONTROL>().value;
++      info.state_registers[1] = regs.Get<reg::RB_STENCILREFMASK>().value;
++      info.state_registers[2] = regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF).value;
++      info.state_registers[3] = regs.Get<reg::PA_SU_SC_MODE_CNTL>().value;
++      info.state_registers[4] = regs.Get<reg::PA_CL_CLIP_CNTL>().value;
++      info.state_registers[5] = regs.Get<reg::PA_CL_VTE_CNTL>().value;
++      info.state_registers[6] = regs.Get<reg::PA_SU_VTX_CNTL>().value;
++      info.state_registers[7] = regs.Get<reg::PA_SC_WINDOW_OFFSET>().value;
++    }
+     RcompDrawEvent(info);
+   }
+ #endif
+@@ -5539,10 +5615,25 @@
+     r.flags = d.flags;
+     char key[5][32];
+     for (int i = 0; i < 5; ++i) rcomp_pass::KeyText(d.rt_key[i], key[i]);
+-    std::fprintf(stderr, "RCOMP-EV D+ n=%llu f=%llu rts=%s,%s,%s,%s,%s prim=%u flags=%x sc=%d,%d,%d,%d vp=%d,%d,%d,%d\n",
++    std::fprintf(stderr, "RCOMP-EV D+ n=%llu f=%llu rts=%s,%s,%s,%s,%s prim=%u flags=%x sc=%d,%d,%d,%d vp=%d,%d,%d,%d",
+                  (unsigned long long)r.seq, (unsigned long long)frame_current_, key[0], key[1], key[2], key[3], key[4],
+                  d.prim_type, d.flags, d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], d.viewport[0],
+                  d.viewport[1], d.viewport[2], d.viewport[3]);
++    if (d.overwrite_valid)
++      std::fprintf(stderr, " ow=%d,%d,%d,%d", d.overwrite[0], d.overwrite[1], d.overwrite[2], d.overwrite[3]);
++    if (d.has_state) {
++      std::fprintf(stderr, " why=%d pos=%g,%g,%g;%g,%g,%g;%g,%g,%g;%g,%g,%g", d.estimate_refusal,
++                   d.estimate_positions[0][0], d.estimate_positions[0][1], d.estimate_positions[0][2],
++                   d.estimate_positions[1][0], d.estimate_positions[1][1], d.estimate_positions[1][2],
++                   d.estimate_positions[2][0], d.estimate_positions[2][1], d.estimate_positions[2][2],
++                   d.estimate_positions[3][0], d.estimate_positions[3][1], d.estimate_positions[3][2]);
++      std::fprintf(stderr, " cand=%d est=%d eb=%.3f,%.3f,%.3f,%.3f dc=%08x sr=%08x,%08x mode=%08x clipc=%08x vte=%08x vtx=%08x woff=%08x",
++                   int(d.candidate), d.estimate_state, d.estimate_bounds[0], d.estimate_bounds[1],
++                   d.estimate_bounds[2], d.estimate_bounds[3], d.state_registers[0], d.state_registers[1],
++                   d.state_registers[2], d.state_registers[3], d.state_registers[4], d.state_registers[5],
++                   d.state_registers[6], d.state_registers[7]);
++    }
++    std::fprintf(stderr, "\n");
+   }
+   using namespace rcomp_draw_flags;
+   ++r.draws;
+diff -ruN a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -1494,9 +1494,11 @@
+ 
+ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+                                      reg::RB_DEPTHCONTROL normalized_depth_control,
+-                                     uint32_t normalized_color_mask, const Shader& vertex_shader) {
++                                     uint32_t normalized_color_mask, const Shader& vertex_shader,
++                                     bool depth_stencil_overwrite_candidate) {
+   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
+-                                 normalized_color_mask, vertex_shader)) {
++                                 normalized_color_mask, vertex_shader,
++                                 depth_stencil_overwrite_candidate)) {
+     return false;
+   }
+ 

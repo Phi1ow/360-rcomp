@@ -1,0 +1,52 @@
+#version 450
+// Random contents for a render target image of the host bench (storage image writes, one thread per pixel, every sample).
+// Defines: IMG_FORMAT (rgba8 | rgba16f | r32ui), IMG_TYPE (image2D | image2DMS | uimage2D | uimage2DMS), SAMPLES, VALUE_KIND (0 rgba8 bytes, 1 four random half floats, 2 32 random bits), NO_NAN (kind 2: no NaN bit patterns).
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, IMG_FORMAT) uniform IMG_TYPE img;
+layout(push_constant) uniform PushConstants {
+  uint seed;
+  uint width;
+  uint height;
+} pc;
+
+uint Hash(uint x) {
+  x ^= x >> 16;
+  x *= 0x7feb352du;
+  x ^= x >> 15;
+  x *= 0x846ca68bu;
+  x ^= x >> 16;
+  return x;
+}
+
+void main() {
+  uvec2 p = gl_GlobalInvocationID.xy;
+  if (p.x >= pc.width || p.y >= pc.height) {
+    return;
+  }
+  for (int s = 0; s < SAMPLES; ++s) {
+    uint h = Hash(Hash(p.x + pc.seed * 0x9E3779B9u) ^ (p.y * 0x85EBCA6Bu + uint(s) * 0xC2B2AE35u + pc.seed));
+#if VALUE_KIND == 0
+    vec4 value = unpackUnorm4x8(h);
+#elif VALUE_KIND == 1
+    uint h2 = Hash(h ^ 0x68E31DA4u);
+    vec4 value = vec4(unpackHalf2x16(h), unpackHalf2x16(h2));
+#else
+#ifdef NAN_TAG
+    // Debugging the order of NaN operands: every sample is a quiet NaN whose payload is the sample index + 1.
+    h = 0x7FC00000u | uint(s + 1);
+#endif
+#ifdef NO_NAN
+    // Random 32-bit floats without NaNs (the exponent of a NaN is made finite): the bit pattern of an NaN that two sums of NaNs produce depends on the order of the operands.
+    if ((h & 0x7F800000u) == 0x7F800000u && (h & 0x007FFFFFu) != 0u) {
+      h ^= 0x00800000u;
+    }
+#endif
+    uvec4 value = uvec4(h, 0u, 0u, 0u);
+#endif
+#if SAMPLES > 1
+    imageStore(img, ivec2(p), s, value);
+#else
+    imageStore(img, ivec2(p), value);
+#endif
+  }
+}

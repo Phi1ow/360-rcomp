@@ -1,0 +1,37 @@
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -134,8 +134,11 @@
+   // remain held through the visitor. It must submit on graphics/compute queue
+   // zero of this device, restore the given layout, and await its GPU work
+   // before returning. It must not call a paint-mode API under this lock.
++  // refresh_serial identifies the successful refresh published in this slot.
++  // It is the monotonic refresher submission, not the image allocation version.
+   bool VisitGuestOutputImage(const std::function<bool(
+-      const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout)>& visitor);
++      const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout,
++      uint64_t refresh_serial)>& visitor);
+ 
+   void AwaitUISubmissionCompletionFromUIThread(uint64_t submission_index) {
+     ui_submission_tracker_.AwaitSubmissionCompletion(submission_index);
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -457,7 +457,8 @@
+ }
+ 
+ bool VulkanPresenter::VisitGuestOutputImage(const std::function<bool(
+-    const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout)>& visitor) {
++    const VulkanDevice*, VkImage, VkExtent2D, VkFormat, VkImageLayout,
++    uint64_t refresh_serial)>& visitor) {
+   if (!visitor) return false;
+   uint32_t mailbox_index;
+   std::unique_lock<std::mutex> consumer_lock(
+@@ -467,7 +468,8 @@
+   if (!instance.ever_successfully_refreshed || !instance.image) return false;
+   const std::shared_ptr<GuestOutputImage> image = instance.image;
+   return visitor(vulkan_device_, image->image(), image->extent(),
+-                 kGuestOutputFormat, kGuestOutputInternalLayout);
++                 kGuestOutputFormat, kGuestOutputInternalLayout,
++                 instance.last_refresher_submission);
+ }
+ 
+ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {

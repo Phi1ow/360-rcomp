@@ -1,0 +1,45 @@
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -87,8 +87,8 @@
+   explicit CommandProcessor(GpuHost* host);
+   virtual ~CommandProcessor();
+ 
+-  uint32_t counter() const { return counter_; }
+-  void increment_counter() { counter_++; }
++  uint32_t counter() const { return counter_.load(std::memory_order_relaxed); }
++  void increment_counter() { counter_.fetch_add(1, std::memory_order_relaxed); }
+ 
+   Shader* active_vertex_shader() const { return active_vertex_shader_; }
+   Shader* active_pixel_shader() const { return active_pixel_shader_; }
+@@ -246,7 +246,10 @@
+   // MicroEngine binary from PM4_ME_INIT
+   std::vector<uint32_t> me_bin_;
+ 
+-  uint32_t counter_ = 0;
++  // XE_SWAP and host vblank both advance this synthetic counter. The
++  // relaxed atomic preserves both increments and wraparound without implying
++  // guest-memory visibility; packet synchronization remains unchanged.
++  std::atomic<uint32_t> counter_{0};
+ 
+   uint32_t primary_buffer_ptr_ = 0;
+   uint32_t primary_buffer_size_ = 0;
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -987,7 +987,7 @@
+ 
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
+-  ++counter_;
++  counter_.fetch_add(1, std::memory_order_relaxed);
+   return true;
+ }
+ 
+@@ -1251,7 +1251,7 @@
+   uint32_t data_value;
+   if ((initiator >> 31) & 0x1) {
+     // Write counter (GPU vblank counter?).
+-    data_value = counter_;
++    data_value = counter_.load(std::memory_order_relaxed);
+   } else {
+     // Write value.
+     data_value = value;

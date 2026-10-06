@@ -1,0 +1,6 @@
+# XenonRecomp configuration for the synthetic XEX title (XEX/TOML mode).
+# Paths are relative to this file's directory in the build (build/xex/).
+# No optimisation option is enabled (all registers stay in PPCContext).
+[main]
+file_path = "rcomp_title.xex"
+out_directory_path = "ppc"

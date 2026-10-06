@@ -1,0 +1,261 @@
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -13,6 +13,8 @@
+ bool Recompiler::LoadConfig(const std::string_view& configFilePath)
+ {
+     config.Load(configFilePath);
++    if (config.invalid)
++        return false;
+ 
+     std::vector<uint8_t> file;
+     if (!config.patchedFilePath.empty())
+@@ -90,9 +92,59 @@
+     }
+ 
+     image = Image::ParseImage(file.data(), file.size());
++
++    // R-comp patch 0022: function thunks of import libraries that are other
++    // recompiled modules (module_import_libraries). The console loader stores
++    // the export's address in the import slot (type 0 record) of the ordinal
++    // and patches the thunk (type 1) to branch there; the thunk symbol, until
++    // now an unresolved import, becomes a call through that slot.
++    for (const auto& thunk : image.importRecords)
++    {
++        if (thunk.type == 0 || std::find(config.moduleImportLibraries.begin(), config.moduleImportLibraries.end(),
++                thunk.library) == config.moduleImportLibraries.end())
++            continue;
++        auto symbol = image.symbols.find(thunk.address);
++        constexpr std::string_view unresolved = "__imp__rcomp_unresolved_";
++        if (symbol == image.symbols.end() || symbol->address != thunk.address ||
++            symbol->name.compare(0, unresolved.size(), unresolved) != 0)
++        {
++            fmt::println("ERROR: module import {} ordinal 0x{:X} at 0x{:X} is not an unresolved import thunk",
++                thunk.library, thunk.ordinal, thunk.address);
++            continue;
++        }
++        const ImageImportRecord* slot = nullptr;
++        for (const auto& record : image.importRecords)
++        {
++            if (record.type == 0 && record.library == thunk.library && record.ordinal == thunk.ordinal)
++            {
++                slot = &record;
++                break;
++            }
++        }
++        if (slot == nullptr)
++        {
++            fmt::println("ERROR: module import {} ordinal 0x{:X} at 0x{:X} has no import slot",
++                thunk.library, thunk.ordinal, thunk.address);
++            continue;
++        }
++        std::string module = thunk.library;
++        for (auto& c : module)
++            if (!isalnum((unsigned char)c)) c = '_';
++        symbol->name = fmt::format("__imp__rcomp_module_{}_{:04X}", module, thunk.ordinal);
++        moduleImportThunks[thunk.address] = { thunk.library, thunk.ordinal, slot->address };
++    }
+     return true;
+ }
+ 
++// R-comp patch 0022: symbols unique by guest address keep their name under
++// symbol_prefix: recompiled functions and the thunks of xboxkrnl.exe/xam.xex
++// exports (__imp__<Export>, defined once by the host).
++static bool IsSharedSymbolName(const std::string& name)
++{
++    return name.compare(0, 4, "sub_") == 0 ||
++        (name.compare(0, 7, "__imp__") == 0 && name.compare(0, 13, "__imp__rcomp_") != 0);
++}
++
+ bool Recompiler::Analyse()
+ {
+     Function::BranchTargets switchEdges;
+@@ -580,7 +632,9 @@
+ 
+                 if (targetSymbol != image.symbols.end() && targetSymbol->address == address && targetSymbol->type == Symbol_Function)
+                 {
+-                    if (config.nonVolatileRegistersAsLocalVariables && (targetSymbol->name.find("__rest") == 0 || targetSymbol->name.find("__save") == 0))
++                    // R-comp patch 0022: the helper names carry symbol_prefix.
++                    const size_t helperName = targetSymbol->name.compare(0, config.symbolPrefix.size(), config.symbolPrefix) == 0 ? config.symbolPrefix.size() : 0;
++                    if (config.nonVolatileRegistersAsLocalVariables && (targetSymbol->name.find("__rest", helperName) == helperName || targetSymbol->name.find("__save", helperName) == helperName))
+                     {
+                         // print nothing
+                     }
+@@ -3215,6 +3269,16 @@
+ {
+     out.reserve(10 * 1024 * 1024);
+ 
++    // R-comp patch 0022: after main() named the entry point _xstart.
++    if (!config.symbolPrefix.empty())
++    {
++        for (auto& symbol : image.symbols)
++        {
++            if (!IsSharedSymbolName(symbol.name))
++                symbol.name = config.symbolPrefix + symbol.name;
++        }
++    }
++
+     {
+         println("#pragma once");
+ 
+@@ -3307,9 +3371,10 @@
+         println("#include \"ppc_recomp_shared.h\"\n");
+ 
+         // R-comp patch 0005: definitions of unresolved imports (xex.cpp).
++        // R-comp patch 0022: names carry symbol_prefix.
++        const std::string prefix = config.symbolPrefix + "__imp__rcomp_unresolved_";
+         for (auto& symbol : image.symbols)
+         {
+-            constexpr std::string_view prefix = "__imp__rcomp_unresolved_";
+             if (symbol.name.compare(0, prefix.size(), prefix) != 0)
+                 continue;
+             std::string rest = symbol.name.substr(prefix.size());
+@@ -3319,7 +3384,21 @@
+             println("}}\n");
+         }
+ 
+-        println("PPCFuncMapping PPCFuncMappings[] = {{");
++        // R-comp patch 0022: function imports from other recompiled modules
++        // (module_import_libraries) call the address in their import slot.
++        for (auto& symbol : image.symbols)
++        {
++            auto thunk = moduleImportThunks.find(symbol.address);
++            if (thunk == moduleImportThunks.end())
++                continue;
++            println("PPC_FUNC({}) {{", symbol.name);
++            println("\t// {} ordinal 0x{:X}: the loader stores the export's address in the import slot 0x{:X}.",
++                thunk->second.library, thunk->second.ordinal, thunk->second.slot);
++            println("\tPPC_CALL_INDIRECT_FUNC(PPC_LOAD_U32(0x{:X}));", thunk->second.slot);
++            println("}}\n");
++        }
++
++        println("PPCFuncMapping {}PPCFuncMappings[] = {{", config.symbolPrefix);
+         for (auto& symbol : image.symbols)
+             println("\t{{ 0x{:X}, {} }},", symbol.address, symbol.name);
+ 
+--- a/XenonRecomp/recompiler.h
++++ b/XenonRecomp/recompiler.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "pch.h"
++#include <map>
+ #include "recompiler_config.h"
+ 
+ struct RecompilerLocalVariables
+@@ -34,6 +35,14 @@
+     std::string out;
+     size_t cppFileIndex = 0;
+     RecompilerConfig config;
++    // R-comp patch 0022: thunk address -> import from another recompiled module.
++    struct ModuleImportThunk
++    {
++        std::string library;
++        uint32_t ordinal{};
++        uint32_t slot{};
++    };
++    std::map<size_t, ModuleImportThunk> moduleImportThunks;
+ 
+     bool LoadConfig(const std::string_view& configFilePath);
+ 
+--- a/XenonRecomp/recompiler_config.cpp
++++ b/XenonRecomp/recompiler_config.cpp
+@@ -38,6 +38,32 @@
+         longJmpAddress = main["longjmp_address"].value_or(0u);
+         setJmpAddress = main["setjmp_address"].value_or(0u);
+ 
++        symbolPrefix = main["symbol_prefix"].value_or<std::string>("");
++        if (!symbolPrefix.empty())
++        {
++            bool valid = !(symbolPrefix[0] >= '0' && symbolPrefix[0] <= '9');
++            for (char c : symbolPrefix)
++                valid = valid && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_');
++            if (!valid)
++            {
++                fmt::println("ERROR: symbol_prefix \"{}\" is not a C identifier prefix", symbolPrefix);
++                invalid = true;
++            }
++        }
++        if (auto libraries = main["module_import_libraries"].as_array())
++        {
++            for (auto& library : *libraries)
++            {
++                if (auto name = library.value<std::string>())
++                    moduleImportLibraries.push_back(*name);
++                else
++                {
++                    fmt::println("ERROR: module_import_libraries holds a non-string entry");
++                    invalid = true;
++                }
++            }
++        }
++
+         if (restGpr14Address == 0) fmt::println("ERROR: __restgprlr_14 address is unspecified");
+         if (saveGpr14Address == 0) fmt::println("ERROR: __savegprlr_14 address is unspecified");
+         if (restFpr14Address == 0) fmt::println("ERROR: __restfpr_14 address is unspecified");
+--- a/XenonRecomp/recompiler_config.h
++++ b/XenonRecomp/recompiler_config.h
+@@ -56,6 +56,19 @@
+     std::unordered_map<uint32_t, uint32_t> functions;
+     std::unordered_map<uint32_t, uint32_t> invalidInstructions;
+     std::unordered_map<uint32_t, RecompilerMidAsmHook> midAsmHooks;
++    // R-comp patch 0022: several modules linked into one program (a title and
++    // its DLLs). `symbol_prefix` prefixes every symbol this generator defines
++    // that is not unique by guest address (sub_XXXXXXXX stay, and so do the
++    // __imp__<Export> thunks of xboxkrnl.exe/xam.xex, which the host defines
++    // once): register save/restore helpers, _xstart, unresolved and module
++    // import thunks and the PPCFuncMappings table. Empty: unchanged output.
++    // `module_import_libraries` names the import libraries that are other
++    // recompiled modules: each function thunk of such a library calls the
++    // address the loader stores in the import slot of the same ordinal, as
++    // the console's patched thunk does, instead of PPC_UNRESOLVED_IMPORT.
++    std::string symbolPrefix;
++    std::vector<std::string> moduleImportLibraries;
++    bool invalid = false;  // an R-comp option above is malformed: LoadConfig fails
+ 
+     void Load(const std::string_view& configFilePath);
+ };
+--- a/XenonUtils/image.h
++++ b/XenonUtils/image.h
+@@ -2,9 +2,21 @@
+ #include <memory>
+ #include <string>
+ #include <set>
++#include <vector>
+ #include <section.h>
+ #include "symbol_table.h"
+ 
++// R-comp patch 0022: one XEX import record (XEX_HEADER_IMPORT_LIBRARIES), as
++// the image lists it: type 0 is the slot the loader fills with the export's
++// address, type 1 the function thunk the generator replaces.
++struct ImageImportRecord
++{
++    std::string library;
++    uint32_t ordinal{};
++    uint32_t type{};
++    uint32_t address{};
++};
++
+ struct Image
+ {
+     std::unique_ptr<uint8_t[]> data{};
+@@ -14,6 +26,7 @@
+     size_t entry_point{};
+     std::set<Section, SectionComparer> sections{};
+     SymbolTable symbols{};
++    std::vector<ImageImportRecord> importRecords{};
+ 
+     /**
+      * \brief Map data to image by RVA
+--- a/XenonUtils/xex.cpp
++++ b/XenonUtils/xex.cpp
+@@ -358,6 +358,10 @@
+                 auto originalThunk = (Xex2ThunkData*)image.Find(descriptors[im].firstThunk);
+                 auto originalData = originalThunk;
+                 originalData->data = ByteSwap(originalData->data);
++                // R-comp patch 0022: keep every record for imports between
++                // modules (slot and thunk of the same ordinal).
++                image.importRecords.push_back({ std::string(stringTable[i]), uint32_t(originalData->originalData.ordinal),
++                    uint32_t(originalData->originalData.type), uint32_t(descriptors[im].firstThunk) });
+ 
+                 if (originalData->originalData.type != 0)
+                 {

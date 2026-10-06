@@ -1,0 +1,22 @@
+RCOMP-TITLE begin title=PPSA88360 program=rcomp_m5 pid=110 log=/app0/rcomp_title.log
+RCOMP-M5 begin index=0 id=m5/rcomp_m5/test_m5_triangle
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=0 words=88001d728
+[ps5vk] compile done: result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=0 words=88001dac8
+[ps5vk] compile done: result=0
+RCOMP-M5 device="PS5 AGC GPU (ps5vk)"
+RCOMP-GFX call=Clear lr=0x00000058 clear=0x00FF00FF frame=0 draw=0 result=0
+RCOMP-GFX call=DrawTriangles lr=0x000000F0 vertices=0x40030000 count=3 colour=0x3399FFFF frame=0 draw=1 result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=88003dbd0 words=0
+[ps5vk] compile done: result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=88003dbd0 words=0
+[ps5vk] compile done: result=0
+RCOMP-GFX call=Present lr=0x00000104  frame=1 draw=1 result=0
+RCOMP-M5 image inside=869 outside=2777 edge_excluded=450 mismatches=0
+{"id":"m5/rcomp_m5/test_m5_triangle","index":0,"status":"PASS","stage":"execute","reason":""}
+RCOMP-M5 executed=1 pass=1 fail=0
+RCOMP-TITLE end status=0

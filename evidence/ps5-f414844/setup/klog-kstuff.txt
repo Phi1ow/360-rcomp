@@ -1,0 +1,71 @@
+<118>[SceWorkaroundCtl] PERIODIC_DOWNLOAD_INTERVAL_SEC={86400} elapsed={2565} isFirstTime={1}
+<118>[SceWorkaroundCtl] start DownloadFile
+<118>[SceWorkaroundCtl] ifModifiedSince={Tue, 21 Apr 2026 02:49:43 +0000}
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\http_client.cpp(141) Get: WC_ISOK::0x8041013d
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\log_util.cpp(71) rtcReformatRFC2822toRFC3339: WC_ISOK::0x80b50007
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\log_util.cpp(99) SetLastModifiedDate: WC_ISOK::0x80b50007
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\workaround_ctl_manager.cpp(326) DownloadFile: WC_ISOK::0x8041013d
+<118>[SceWorkaroundCtl] W:\Build\J03247173\vsh\shell\shell_core\workaround_ctl\workaround_ctl_manager.cpp(498) Run: WC_CONTINUE::0x8041013d
+<118>[SceWorkaroundCtl] PERIODIC_CHECK_INTERVAL_SEC={420}
+<118>[SceSystemStateMgr] No user input for 180 seconds
+<118>[SceConsoleFeatureFlagChecker] W:\Build\J03247173\vsh\shell\shell_core\console_feature_flag_checker\cffchecker.cpp(810) getCurrentTick: CFFCHECKER_RTRACE::0x80b50001
+<90> EXEC /system/vsh/app/NPXS40112/eboot.bin [unspecified], vm#0, dmem#0 abi=native category=unknown <2594081 msec>
+<118>[kstuff.elf] Remounting /system_ex and mounting titles...
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99420 -> /system_ex/app/PPSA99420
+<118>[kstuff.elf] Successfully mounted title PPSA99420 -> /data/homebrew/PPSA99420
+<118>[kstuff.elf] Title Mounted Successfully: /data/homebrew/PPSA99421 -> /system_ex/app/PPSA99421
+<118>[kstuff.elf] Successfully mounted title PPSA99421 -> /data/homebrew/PPSA99421
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00001 -> /system_ex/app/WIKT00001
+<118>[kstuff.elf] Successfully mounted title WIKT00001 -> /data/WIKT00001
+<118>[kstuff.elf] Title Mounted Successfully: /data/WIKT00002 -> /system_ex/app/WIKT00002
+<118>[kstuff.elf] Successfully mounted title WIKT00002 -> /data/WIKT00002
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99611 -> /system_ex/app/PPSA99611
+<118>[kstuff.elf] Successfully mounted title PPSA99611 -> /data/PPSA99611
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99700 -> /system_ex/app/PPSA99700
+<118>[kstuff.elf] Successfully mounted title PPSA99700 -> /data/PPSA99700
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99701 -> /system_ex/app/PPSA99701
+<118>[kstuff.elf] Successfully mounted title PPSA99701 -> /data/PPSA99701
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99702 -> /system_ex/app/PPSA99702
+<118>[kstuff.elf] Successfully mounted title PPSA99702 -> /data/PPSA99702
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99703 -> /system_ex/app/PPSA99703
+<118>[kstuff.elf] Successfully mounted title PPSA99703 -> /data/PPSA99703
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99710 -> /system_ex/app/PPSA99710
+<118>[kstuff.elf] Successfully mounted title PPSA99710 -> /data/PPSA99710
+<118>[kstuff.elf] Title Mounted Successfully: /data/PPSA99711 -> /system_ex/app/PPSA99711
+<118>[kstuff.elf] Successfully mounted title PPSA99711 -> /data/PPSA99711
+<118>[kstuff.elf] Failed to bind mount title with mount_nullfs: No such file or directory
+<118>[kstuff.elf] Failed to bind mount title PPSA99612 -> /data/PPSA99612
+
+<118>[SceShellCore] VM Stats: RSS 292.6 910.0, kernel 313.1 93.4, wire count 376.5 117.0, swap out 0.0, page table CPU 4389/9216 GPU 120/9216
+<118>[SceShellCore] FMEM   0.0/   0.0   1.7/   4.2 NPXS40095 SceSysAvControl.elf
+<118>[SceShellCore] FMEM   0.0/   0.0  14.9/ 103.5 NPXS45091 SceSysCore.elf
+<118>[SceShellCore] FMEM  20.1/  30.4  16.1/  34.7 NPXS40096 orbis_audiod.elf
+<118>[SceShellCore] FMEM   5.0/  12.3   2.8/  22.2 NPXS40135 AgcCompositor.elf
+<118>[SceShellCore] FMEM  81.8/ 674.1   0.0/   0.0 NPXS40082 SceShellCore
+<118>[SceShellCore] FMEM  30.6/ 157.9 519.3/2540.3 NPXS40087 SceShellUI
+<118>[SceShellCore] FMEM   0.1/   0.1   4.8/  23.4 NPXS40100 SceAvCapture
+<118>[SceShellCore] FMEM   0.0/   0.0  15.7/  80.0 NPXS40102 SceRemotePlay
+<118>[SceShellCore] FMEM   0.1/  25.0   2.9/   9.8 NPXS40091 SceUpdatePupUtil
+<118>[SceShellCore] FMEM   0.0/   0.3  10.2/  48.0 NPXS40142 SceGameLiveStreaming
+<118>[SceShellCore] FMEM   6.1/   7.1  35.4/ 103.3 NPXS40109 ScePartyDaemon
+<118>[SceShellCore] FMEM   1.2/  16.1   5.7/  30.1 NPXS40039 SceMediaCoreServer
+<118>[SceShellCore] FMEM   0.5/  17.4   7.5/  57.3 NPXS40153 ScePsNowClientDaemon
+<118>[SceShellCore] FMEM   0.2/  11.0   4.1/   9.7 NPXS40112 SceSpZeroConf
+<118>[SceShellCore] FMEM   0.1/  11.9   3.5/   8.3 NPXS40101 SceSocialScreenMgr
+<118>[SceShellCore] FMEM   0.0/   0.0  20.6/  85.6 NPXS40094 SceVoiceAndAgent
+<118>[SceShellCore] FMEM   0.0/   0.0   5.8/  30.9 NPXS40028 SceRedisServer
+<118>[SceShellCore] FMEM   0.2/   0.2  48.7/ 750.5 NPXS40000 SceJSCd
+<118>[SceShellCore] FMEM   0.2/   0.2  11.8/  46.6 NPXS40085 SceSystemLogger2
+<118>[SceShellCore] FMEM   0.1/   8.1   4.1/  19.5 NPXS40173 SceVrTrackerDaemon
+<118>[SceShellCore] FMEM   0.0/   0.0  10.8/ 153.2 NPXS40210 SceDiscordDaemon
+<118>[SceShellCore] FMEM   2.4/  13.6   0.0/   0.0 NPXS45093 fs_cleaner.elf
+<118>[SceShellCore] FMEM   5.2/   5.2   9.4/ 165.3 NPXS40109 webrtc_daemon.self
+<118>[SceShellCore] FMEM   1.2/  12.3  24.7/ 480.4 NPXS40039 SceVideoCore2K
+<118>[SceShellCore] FMEM   0.2/  11.0  67.9/ 123.1 NPXS40087 SceNKUIProcess
+<118>[SceShellCore] FMEM   1.4/  17.7  61.7/ 117.0 NPXS40087 SceNKNetworkProcess
+<118>[SceShellCore] FMEM   7.9/  24.0   0.0/   0.0 pldmgr.elf
+<118>[SceShellCore] FMEM  58.9/  73.6   0.0/   0.0 elfldr.elf
+<118>[SceShellCore] FMEM  58.1/  75.1   0.0/   0.0 zftpd.elf
+<118>[SceShellCore] FMEM   3.4/  17.3   0.0/   0.0 payload.elf
+<118>[SceShellCore] FMEM   2.8/  16.6   0.0/   0.0 klogsrv.elf
+<118>[SceShellCore] FMEM   4.7/  18.5   0.0/   0.0 kstuff.elf

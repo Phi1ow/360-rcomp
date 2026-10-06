@@ -1,0 +1,15 @@
+--- a/gpu/xenos/rexglue/shim/rex/system/xmemory.h
++++ b/gpu/xenos/rexglue/shim/rex/system/xmemory.h
+@@ -108,7 +108,11 @@
+       for (auto* c : callbacks_) cbs.push_back(*c);
+     }
+     for (const auto& r : runs)
+-      for (const auto& c : cbs) c.first(c.second, r.first, r.second, false);
++      for (const auto& c : cbs) {
++        // Runs contain every watched 4 KiB page. Fault-amortization widening
++        // in SharedMemory is unnecessary here; its returned range is unused.
++        c.first(c.second, r.first, r.second, true);
++      }
+   }
+ 
+   // Guest virtual -> physical for addresses inside the physical window,

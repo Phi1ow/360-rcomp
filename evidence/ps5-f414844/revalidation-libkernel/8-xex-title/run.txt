@@ -1,0 +1,17 @@
+00:26:07 status before: ok idle
+00:26:08 $ ps5_ftp_kit.py push D:/emu 4/diag-kit\8-xex-title\PPSA88360 -> exit 0
+00:26:08   deleting previous /data/homebrew/PPSA88360
+00:26:08     /data/homebrew/PPSA88360/eboot.bin (604570 bytes)
+00:26:08     /data/homebrew/PPSA88360/manifest.sha256 (436 bytes)
+00:26:08     /data/homebrew/PPSA88360/fixtures/xex/rcomp_title.xex (24576 bytes)
+00:26:08     /data/homebrew/PPSA88360/sce_module/libc.prx (1284674 bytes)
+00:26:08     /data/homebrew/PPSA88360/sce_sys/icon0.png (1496 bytes)
+00:26:08     /data/homebrew/PPSA88360/sce_sys/param.json (734 bytes)
+00:26:08   OK: 6 files in /data/homebrew/PPSA88360, sizes checked; execute bit set (SITE CHMOD). Launch PPSA88360 on the console now.
+00:26:12 chmod: chmodtitle: /data/homebrew/PPSA88360 fixed=11 failed=0
+00:26:15 launch: ok launched PPSA88360 result=0x0000e018 via lncUtilApp/foreground as user 395971800 (the console reports the title running)
+00:26:45 title never seen running after 30s: ok procs app=4294967295 title= count=0 pids=
+00:26:45 status after: ok idle
+00:26:47 $ ps5_ftp_kit.py pull --out D:/emu 4/ps5-logs-diag\8-xex-title -> exit 0
+00:26:47   downloaded /data/homebrew/PPSA88360/rcomp_title.log -> D:/emu 4/ps5-logs-diag\8-xex-title\rcomp_title.log
+00:26:47   verdict: end status=0

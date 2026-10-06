@@ -1,0 +1,64 @@
+diff -ruN a/XenonUtils/xex.cpp b/XenonUtils/xex.cpp
+--- a/XenonUtils/xex.cpp	2026-09-25 16:46:20.649756243 +0000
++++ b/XenonUtils/xex.cpp	2026-09-25 16:46:42.105802598 +0000
+@@ -126,13 +126,15 @@
+     #include "xbox/xboxkrnl_table.inc"
+ };
+ 
+-Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
++// R-comp patch 0006: decryption/decompression split out of Xex2LoadImage so
++// that a host tool can obtain the decoded image *before* the thunks and
++// import records are rewritten. Returns nullptr on failure.
++std::unique_ptr<uint8_t[]> Xex2DecodeImage(const uint8_t* data, size_t dataSize, size_t* decodedSize)
+ {
+     auto* header = reinterpret_cast<const Xex2Header*>(data);
+     auto* security = reinterpret_cast<const Xex2SecurityInfo*>(data + header->securityOffset);
+     const auto* fileFormatInfo = reinterpret_cast<const Xex2OptFileFormatInfo*>(getOptHeaderPtr(data, XEX_HEADER_FILE_FORMAT_INFO));
+ 
+-    Image image{};
+     std::unique_ptr<uint8_t[]> result{};
+     size_t imageSize = security->imageSize;
+ 
+@@ -140,6 +142,9 @@
+     if (fileFormatInfo != nullptr)
+     {
+         assert(fileFormatInfo->compressionType <= XEX_COMPRESSION_NORMAL);
++        // R-comp patch 0006: the assert vanishes in release builds.
++        if (fileFormatInfo->compressionType > XEX_COMPRESSION_NORMAL || fileFormatInfo->encryptionType > XEX_ENCRYPTION_NORMAL)
++            return {};
+ 
+         std::unique_ptr<uint8_t[]> decryptedData;
+         const uint8_t* srcData = nullptr;
+@@ -259,6 +264,22 @@
+         }
+     }
+ 
++
++    if (decodedSize != nullptr)
++        *decodedSize = imageSize;
++    return result;
++}
++
++Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
++{
++    auto* header = reinterpret_cast<const Xex2Header*>(data);
++    auto* security = reinterpret_cast<const Xex2SecurityInfo*>(data + header->securityOffset);
++
++    Image image{};
++    std::unique_ptr<uint8_t[]> result = Xex2DecodeImage(data, dataSize, nullptr);
++    if (!result)
++        return {};
++
+     image.data = std::move(result);
+     image.size = security->imageSize;
+ 
+diff -ruN a/XenonUtils/xex.h b/XenonUtils/xex.h
+--- a/XenonUtils/xex.h	2026-09-25 16:46:20.649788444 +0000
++++ b/XenonUtils/xex.h	2026-09-25 16:46:42.106469958 +0000
+@@ -265,3 +265,6 @@
+ 
+ struct Image;
+ Image Xex2LoadImage(const uint8_t* data, size_t dataSize);
++// R-comp patch 0006: decrypted, decompressed PE image as stored in the XEX
++// (thunks and import records untouched); *decodedSize = its size in bytes.
++std::unique_ptr<uint8_t[]> Xex2DecodeImage(const uint8_t* data, size_t dataSize, size_t* decodedSize);

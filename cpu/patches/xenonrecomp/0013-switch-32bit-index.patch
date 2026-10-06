@@ -1,0 +1,26 @@
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -677,7 +677,10 @@
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            // The table index is a 32-bit value: the guarding cmplwi and the rlwinm that scales it
++            // only see the low word, while the 64-bit register may carry upper bits (addi on
++            // 0xFFFFFFFE gives 0x1_00000001). Switching on .u64 would then take `default`.
++            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+@@ -696,6 +699,11 @@
+             }
+ 
+             println("\tdefault:");
++            // A runtime may diagnose an index the analysed guard did not exclude instead of
++            // reaching undefined behaviour.
++            println("#ifdef PPC_SWITCH_OUT_OF_RANGE");
++            println("\t\tPPC_SWITCH_OUT_OF_RANGE(0x{:X}, {}.u32);", base, r(switchTable->second.r));
++            println("#endif");
+             println("\t\t__builtin_unreachable();");
+             println("\t}}");
+ 

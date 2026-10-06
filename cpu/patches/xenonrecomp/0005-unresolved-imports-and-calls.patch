@@ -1,0 +1,84 @@
+diff -ruN e/XenonRecomp/recompiler.cpp f/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 16:21:15.802139247 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 16:26:19.434781964 +0000
+@@ -399,7 +399,9 @@
+                 }
+                 else
+                 {
+-                    println("\t// ERROR {:X}", address);
++                    // R-comp patch 0005: was only a comment (the call vanished).
++                    fmt::println("Direct call to 0x{:X} with no recompiled function", address);
++                    println("\tPPC_CALL_UNKNOWN(0x{:X});", address);
+                 }
+             }
+         };
+@@ -2754,6 +2756,19 @@
+     {
+         println("#include \"ppc_recomp_shared.h\"\n");
+ 
++        // R-comp patch 0005: definitions of unresolved imports (xex.cpp).
++        for (auto& symbol : image.symbols)
++        {
++            constexpr std::string_view prefix = "__imp__rcomp_unresolved_";
++            if (symbol.name.compare(0, prefix.size(), prefix) != 0)
++                continue;
++            std::string rest = symbol.name.substr(prefix.size());
++            size_t us = rest.rfind('_');
++            println("PPC_FUNC({}) {{", symbol.name);
++            println("\tPPC_UNRESOLVED_IMPORT(\"{}\", 0x{});", rest.substr(0, us), rest.substr(us + 1));
++            println("}}\n");
++        }
++
+         println("PPCFuncMapping PPCFuncMappings[] = {{");
+         for (auto& symbol : image.symbols)
+             println("\t{{ 0x{:X}, {} }},", symbol.address, symbol.name);
+diff -ruN e/XenonUtils/ppc_context.h f/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-09-25 16:21:15.801635254 +0000
++++ b/XenonUtils/ppc_context.h	2026-09-25 16:26:19.434337586 +0000
+@@ -101,6 +101,16 @@
+ #define PPC_MM_STORE_U64(x, y)  PPC_STORE_U64(x, y)
+ #endif
+ 
++// R-comp patch 0005. A call to an import no export table names, and a direct
++// call to an address where no function was recompiled. Hosts override both to
++// report the site; the defaults stop the process.
++#ifndef PPC_UNRESOLVED_IMPORT
++#define PPC_UNRESOLVED_IMPORT(module, ordinal) __builtin_trap()
++#endif
++#ifndef PPC_CALL_UNKNOWN
++#define PPC_CALL_UNKNOWN(address) __builtin_trap()
++#endif
++
+ // Guest trap (tw/twi/td/tdi with a true condition). Hosts override it to
+ // report the guest address; the default stops the process.
+ #ifndef PPC_TRAP
+diff -ruN e/XenonUtils/xex.cpp f/XenonUtils/xex.cpp
+--- a/XenonUtils/xex.cpp	2026-09-25 13:07:33.933470302 +0000
++++ b/XenonUtils/xex.cpp	2026-09-25 16:26:19.434175278 +0000
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <cctype>
+ #include "xex.h"
+ #include "image.h"
+ #include <cassert>
+@@ -338,6 +340,20 @@
+                     {
+                         image.symbols.insert({ name->second, descriptors[im].firstThunk, sizeof(thunk), Symbol_Function });
+                     }
++                    else
++                    {
++                        // R-comp patch 0005: an import with no known name used
++                        // to leave only the nop/blr thunk, i.e. a call that
++                        // silently did nothing. Give it a symbol the generator
++                        // defines as PPC_UNRESOLVED_IMPORT(module, ordinal).
++                        std::string module(stringTable[i]);
++                        for (auto& c : module)
++                            if (!isalnum((unsigned char)c)) c = '_';
++                        char unresolved[128];
++                        snprintf(unresolved, sizeof(unresolved), "__imp__rcomp_unresolved_%s_%04X", module.c_str(),
++                            unsigned(originalData->originalData.ordinal));
++                        image.symbols.insert({ unresolved, descriptors[im].firstThunk, sizeof(thunk), Symbol_Function });
++                    }
+ 
+                     memcpy(originalThunk, thunk, sizeof(thunk));
+                 }

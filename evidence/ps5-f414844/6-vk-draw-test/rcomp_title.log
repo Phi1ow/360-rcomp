@@ -1,0 +1,24 @@
+RCOMP-TITLE begin title=PPSA88360 program=rcomp_vk_draw_test pid=108 log=/app0/rcomp_title.log
+draw_test: evidence: PS5 (PS5_Vulkan linked statically)
+draw_test: device "PS5 AGC GPU (ps5vk)" apiVersion 1.0.0 driverVersion 0x2000
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=0 words=88001ab08
+[ps5vk] compile done: result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=0 words=88001aea8
+[ps5vk] compile done: result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=880046050 words=0
+[ps5vk] compile done: result=0
+[ScePthread/System] Internal Memory is running out.
+[ps5vk] compile start: nir=880046050 words=0
+[ps5vk] compile done: result=0
+draw_test: control (16,16) class 1 = 51,153,255,255
+draw_test: control (12,40) class 1 = 51,153,255,255
+draw_test: control (40,12) class 1 = 51,153,255,255
+draw_test: control (2,2) class -1 = 255,0,0,255
+draw_test: control (60,60) class -1 = 255,0,0,255
+draw_test: control (50,50) class -1 = 255,0,0,255
+draw_test: checked 946 inside + 2718 outside pixels, 432 edge pixels excluded (margin 1.5 px), 0 mismatches
+draw_test: readback PASS
+RCOMP-TITLE end status=0

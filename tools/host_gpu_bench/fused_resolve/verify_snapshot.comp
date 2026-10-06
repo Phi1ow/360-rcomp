@@ -1,0 +1,16 @@
+#version 450
+// Verification of the fused resolve (rcomp_fused_resolve_verify): copies the words of the resolve's destination range into the scratch buffer before the resolve writes it.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer RealDestination { uint real[]; };
+layout(std430, set = 1, binding = 0) writeonly buffer Scratch { uint scratch[]; };
+layout(push_constant) uniform PushConstants {
+  uint words;
+  uint word_offset;
+  uint slot;
+} pc;
+void main() {
+  uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * (4096u * 256u);
+  if (i < pc.words) {
+    scratch[pc.word_offset + i] = real[pc.word_offset + i];
+  }
+}

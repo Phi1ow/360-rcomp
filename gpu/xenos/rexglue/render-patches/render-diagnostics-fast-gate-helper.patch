@@ -1,0 +1,40 @@
+--- a/gpu/xenos/rexglue/shim/rcomp_xenos/render_diagnostics.h
++++ b/gpu/xenos/rexglue/shim/rcomp_xenos/render_diagnostics.h
+@@ -38,16 +38,22 @@
+ class RenderDiagnosticGate {
+  public:
+   static constexpr uint32_t kStatesPerKind = 64;
++  // All three cvars require restart and are configured before GPU startup.
++  // Read once when the first CP call constructs this gate.
++  RenderDiagnosticGate()
++      : enabled_(REXCVAR_GET(rcomp_render_diagnostics)),
++        first_(uint64_t(std::max(REXCVAR_GET(rcomp_render_diag_start_frame), 0))),
++        frames_(uint64_t(std::clamp(REXCVAR_GET(rcomp_render_diag_frames), 1, 32))) {}
++  bool InWindow(uint64_t frame) const {
++    return enabled_ && frame >= first_ && frame - first_ < frames_;
++  }
+   bool Accept(RenderDiagnosticKind kind, uint64_t frame, const RenderDiagnosticKey& key) {
+-    if (!REXCVAR_GET(rcomp_render_diagnostics)) return false;
+-    const uint64_t first = uint64_t(std::max(REXCVAR_GET(rcomp_render_diag_start_frame), 0));
+-    const uint64_t frames = uint64_t(std::clamp(REXCVAR_GET(rcomp_render_diag_frames), 1, 32));
+-    if (frame < first || frame - first >= frames) return false;
++    if (!InWindow(frame)) return false;
+     const uint32_t index = uint32_t(kind);
+     if (!announced_) {
+       announced_ = true;
+       std::fprintf(stderr, "RCOMP-RENDER-DIAG begin frame=%llu frames=%llu exact_states_per_kind=%u\n",
+-                   (unsigned long long)first, (unsigned long long)frames, kStatesPerKind);
++                   (unsigned long long)first_, (unsigned long long)frames_, kStatesPerKind);
+     }
+     for (uint32_t i = 0; i < counts_[index]; ++i) if (keys_[index][i] == key) return false;
+     if (counts_[index] == kStatesPerKind) {
+@@ -66,6 +72,9 @@
+   std::array<uint32_t, kKinds> counts_{};
+   std::array<bool, kKinds> limited_{};
+   bool announced_ = false;
++  const bool enabled_;
++  const uint64_t first_;
++  const uint64_t frames_;
+ };
+ inline RenderDiagnosticGate& RenderDiagnostics() {
+   static RenderDiagnosticGate gate;

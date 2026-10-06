@@ -1,0 +1,23 @@
+--- a/XenonUtils/xex.cpp
++++ b/XenonUtils/xex.cpp
+@@ -181,12 +181,18 @@
+             auto* blocks = reinterpret_cast<const Xex2FileBasicCompressionBlock*>(fileFormatInfo + 1);
+             const size_t numBlocks = (fileFormatInfo->infoSize / sizeof(Xex2FileBasicCompressionInfo)) - 1;
+ 
+-            imageSize = 0;
++            size_t describedSize = 0;
+             for (size_t i = 0; i < numBlocks; i++)
+             {
+-                imageSize += blocks[i].dataSize + blocks[i].zeroSize;
++                describedSize += blocks[i].dataSize + blocks[i].zeroSize;
+             }
+ 
++            // R-comp patch 0018: the blocks may describe less than the image the security info declares (the Episodes from Liberty City
++            // executable: 32768 bytes less). The console's loader allocates the declared size, zeroed, and fills the blocks into it, so the
++            // tail stays zero. The image is never smaller than the declared size (callers use security->imageSize as its length).
++            if (describedSize > imageSize)
++                imageSize = describedSize;
++
+             result = std::make_unique<uint8_t[]>(imageSize);
+             auto* destData = result.get();
+ 

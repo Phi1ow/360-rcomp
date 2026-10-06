@@ -1,0 +1,4 @@
+# Original PPC boot rehearsal; paths relative to generated build copy.
+[main]
+file_path = "rcomp_boot.xex"
+out_directory_path = "ppc"

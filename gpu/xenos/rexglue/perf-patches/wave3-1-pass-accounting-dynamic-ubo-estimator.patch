@@ -1,0 +1,1187 @@
+diff -ruN a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -180,6 +180,15 @@
+   // each.
+   uint32_t GetLastUpdateBoundRenderTargets(uint32_t* depth_and_color_formats_out = nullptr) const;
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  // R-comp pass accounting: the render targets bound by the last Update (RenderTargetKey::key, 0 =
++  // not bound) and the EDRAM tile range each of them claimed ([base, base + length)), depth first.
++  struct RcompClaim {
++    uint32_t key = 0, base = 0, length = 0;
++  };
++  RcompClaim rcomp_last_claims_[1 + xenos::kMaxColorRenderTargets];
++#endif
++
+  protected:
+   RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
+                     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -15,6 +15,7 @@
+ #include <array>
+ #include <climits>
+ #include <cstdint>
++#include <cstdio>
+ #include <deque>
+ #include <functional>
+ #include <memory>
+@@ -46,6 +47,65 @@
+ 
+ namespace rex::graphics::vulkan {
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++// R-comp pass accounting (RCOMP_XENOS_PROFILE_TIMINGS only): bits of RcompDrawEventInfo::flags.
++namespace rcomp_draw_flags {
++enum : uint32_t {
++  kZRead = 1u << 0,             // depth test that can read the depth buffer (z enabled, function not ALWAYS)
++  kZWrite = 1u << 1,
++  kStencil = 1u << 2,           // stencil enabled (reads and writes)
++  kBlend = 1u << 3,             // a bound color target is blended with its previous contents
++  kPartialColorMask = 1u << 4,  // a bound color target is not written in all four channels
++  kNoPixelShader = 1u << 5,
++  kClipDisabled = 1u << 6,
++  kKills = 1u << 7,             // the pixel shader can discard
++  kZAlways = 1u << 8,           // z function ALWAYS
++  kRectList = 1u << 9,
++  kWritesDepth = 1u << 10,      // the pixel shader writes depth
++  kReadsColor = kBlend | kPartialColorMask,
++};
++}  // namespace rcomp_draw_flags
++
++// Pass class keys: bits 0-3 are the kind, the rest depends on it. A render target is described by
++// its type, bits 19-25 of RenderTargetKey::key (MSAA samples, depth flag, resource format).
++namespace rcomp_pass {
++enum : uint32_t {
++  kTransfer = 1,
++  kHostDepthStore = 2,
++  kResolveDump = 3,
++  kResolveCopy = 4,
++  kResolveClear = 5,
++};
++inline uint32_t RtType(uint32_t render_target_key) { return (render_target_key >> 19) & 0x7F; }
++inline uint64_t TransferClass(uint32_t dest_key, uint32_t source_key, uint32_t mode, bool host_depth) {
++  return kTransfer | (uint64_t(RtType(dest_key)) << 4) | (uint64_t(RtType(source_key)) << 11) |
++         (uint64_t(mode & 0x1F) << 18) | (uint64_t(host_depth) << 23);
++}
++inline uint64_t HostDepthStoreClass(uint32_t dest_key) {
++  return kHostDepthStore | (uint64_t(RtType(dest_key)) << 4);
++}
++inline uint64_t DumpClass(uint32_t render_target_key) {
++  return kResolveDump | (uint64_t(RtType(render_target_key)) << 4);
++}
++inline uint64_t CopyClass(uint32_t copy_shader, bool scaled) {
++  return kResolveCopy | (uint64_t(copy_shader & 0xFF) << 4) | (uint64_t(scaled) << 12);
++}
++inline uint64_t ClearClass(uint32_t dest_key) {
++  return kResolveClear | (uint64_t(RtType(dest_key)) << 4);
++}
++// Timeline notation of a render target key: b<base tiles>.p<pitch tiles at 32 bpp>.m<MSAA log2>.<D|C><format>
++inline void KeyText(uint32_t key, char (&out)[32]) {
++  if (!key) {
++    out[0] = '-';
++    out[1] = 0;
++    return;
++  }
++  std::snprintf(out, sizeof out, "b%u.p%u.m%u.%c%u", key & 0x7FF, (key >> 11) & 0xFF, (key >> 19) & 3,
++                ((key >> 21) & 1) ? 'D' : 'C', (key >> 22) & 0xF);
++}
++}  // namespace rcomp_pass
++#endif
++
+ class VulkanCommandProcessor : public CommandProcessor {
+  public:
+   // Single-descriptor layouts for use within a single frame.
+@@ -157,6 +217,33 @@
+   // recorded after this call, until the next mark, is attributed to `label`
+   // (0 draw, 1 render target transfer, 2 resolve, 3 swap, 4 texture load).
+   void RcompGpuMark(uint32_t label);
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  // R-comp pass accounting (RCOMP_XENOS_PROFILE_TIMINGS only). A pass is one unit of EDRAM work: a
++  // render target transfer draw, a resolve dump or copy, a clear. The GPU time between RcompPassBegin
++  // and RcompPassEnd is summed per class (a packed description, see rcomp_pass::) and printed as
++  // RCOMP-PASS lines; `category` is the GPU label the time falls back to afterwards (1 transfers,
++  // 2 resolves). `pixels` is the host area written, `tiles` the EDRAM tiles covered.
++  void RcompPassBegin(uint64_t class_key, uint64_t pixels, uint32_t tiles, uint32_t category);
++  void RcompPassEnd(uint32_t category);
++  // True while the bounded event timeline (RCOMP-EV lines, a few guest frames) is being written.
++  bool RcompEventsOpen();
++  // One call per draw that reached the GPU: input of the draw-run summaries of the timeline.
++  struct RcompDrawEventInfo {
++    uint32_t rt_key[5];       // render target keys, depth first (0 = none)
++    uint32_t claim_base[5];   // EDRAM tiles claimed by the draw for each of them
++    uint32_t claim_length[5];
++    uint32_t prim_type;
++    uint32_t vertices;
++    uint32_t flags;           // see rcomp_draw_flags
++    int32_t scissor[4];       // left, top, right, bottom (guest pixels)
++    int32_t viewport[4];      // x offset, y offset, x extent, y extent (guest pixels)
++  };
++  void RcompDrawEvent(const RcompDrawEventInfo& info);
++  // Closes the draw run being summarised (before another kind of event is written).
++  void RcompFlushDrawRun();
++  // Sequence number of the next timeline line (events are ordered by it).
++  uint64_t RcompNextEventSeq();
++#endif
+   uint64_t GetCurrentSubmission() const {
+     return submission_completed_ + uint64_t(submissions_in_flight_fences_.size()) + 1;
+   }
+@@ -609,6 +696,20 @@
+   // <Usage frame, set>.
+   std::deque<std::pair<uint64_t, VkDescriptorSet>> constants_transient_descriptors_used_;
+   std::vector<VkDescriptorSet> constants_transient_descriptors_free_;
++
++  // R-comp: the guest constants are bound through dynamic uniform buffers. One persistent descriptor
++  // set per uniform buffer pool page (a VkBuffer) has all five bindings at offset 0 of that page, each
++  // with the largest range of its constant buffer; a draw selects its data with five dynamic offsets
++  // when the set is bound, so no descriptor is allocated or written per draw. The sets live until the
++  // caches are cleared (the pool pages are only recycled, not destroyed, before that).
++  VkDescriptorSet GetConstantsDescriptorSet(VkBuffer page_buffer);
++  // Uniform buffer pool request that keeps the largest constants range (4 KiB) inside the page: a
++  // dynamic uniform buffer descriptor has a fixed range, so a block close to the end of a page would
++  // have a descriptor reaching beyond the buffer. The rest of such a page is skipped.
++  uint8_t* RequestConstants(size_t size, size_t alignment, VkBuffer& buffer_out, VkDeviceSize& offset_out);
++  std::unordered_map<VkBuffer, VkDescriptorSet> constants_page_descriptor_sets_;
++  std::vector<VkDescriptorPool> constants_page_descriptor_pools_;
++  uint32_t constants_dynamic_offsets_[SpirvShaderTranslator::kConstantBufferCount] = {};
+ 
+   ui::vulkan::LinkedTypeDescriptorSetAllocator transient_descriptor_allocator_textures_;
+   std::deque<UsedTextureTransientDescriptorSet> texture_transient_descriptor_sets_used_;
+diff -ruN a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -538,6 +538,11 @@
+       last_update_transfers_[i].clear();
+     }
+   }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  for (RcompClaim& claim : rcomp_last_claims_) {
++    claim = RcompClaim();
++  }
++#endif
+ 
+   if (!depth_and_color_rts_used_bits) {
+     // Nothing to bind, don't waste time on things like memexport-only draws -
+@@ -683,6 +688,17 @@
+   // draw with whatever contents currently are in the render target in this
+   // case).
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  for (RcompClaim& claim : rcomp_last_claims_) {
++    claim = RcompClaim();
++  }
++  for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
++    const uint32_t slot = edram_bases_sorted[i].second;
++    rcomp_last_claims_[slot].key = rt_keys[slot].key;
++    rcomp_last_claims_[slot].base = rt_keys[slot].base_tiles;
++    rcomp_last_claims_[slot].length = rt_lengths_tiles[i];
++  }
++#endif
+   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
+     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
+     uint32_t rt_bit_index = rt_base_index.second;
+diff -ruN a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -24,7 +24,10 @@
+ #include <rex/memory.h>
+ #include <rex/ui/graphics_util.h>
+ 
+-REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, false, "GPU",
++// R-comp: Xenia's own default (true), measured +16...+34 % frame rate at 4K on the PS5 (journal
++// section 80). Without it a draw with clipping disabled and no scissor (a clear, a full-screen
++// rectangle) claims the rest of the EDRAM, and every claim is a full-surface ownership transfer.
++REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu, true, "GPU",
+                     "Execute unclipped draw vertex shader on CPU");
+ 
+ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_with_scissor, false, "GPU",
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3,6 +3,7 @@
+ #include <x86intrin.h>
+ #include <cstdio>
+ #include <atomic>
++#include <chrono>
+ #include <rcomp_xenos/diagnostics.h>
+ #include <rcomp_xenos/render_diagnostics.h>
+ /**
+@@ -844,7 +845,8 @@
+   for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+     VkDescriptorSetLayoutBinding& constants_binding = descriptor_set_layout_bindings_constants[i];
+     constants_binding.binding = i;
+-    constants_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++    // R-comp: dynamic offsets (see GetConstantsDescriptorSet).
++    constants_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+     constants_binding.descriptorCount = 1;
+     constants_binding.pImmutableSamplers = nullptr;
+   }
+@@ -3648,6 +3650,7 @@
+                                        IndexBufferInfo* index_buffer_info,
+                                        bool major_mode_explicit) {
+   RcompProfScope rcomp_prof_scope(0);
++  RCOMP_PROF_STAMP(rcomp_t_before_loop);
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -3757,6 +3760,7 @@
+   VulkanShader::VulkanTranslation* pixel_shader_translation;
+   bool memexport_writes_possible = memexport_used_vertex || memexport_used_pixel;
+ 
++  RCOMP_PROF_ADD(50, rcomp_t_before_loop);
+   // Two iterations because a submission (even the current one - in which case
+   // it needs to be ended, and a new one must be started) may need to be awaited
+   // in case of a sampler count overflow, and if that happens, all subsystem
+@@ -3769,8 +3773,11 @@
+     }
+ 
+     // Process primitives.
+-    if (!primitive_processor_->Process(primitive_processing_result)) {
+-      return draw_fail("primitive_processing");
++    {
++      RcompProfScope rcomp_prof_primitives(44);
++      if (!primitive_processor_->Process(primitive_processing_result)) {
++        return draw_fail("primitive_processing");
++      }
+     }
+     if (!primitive_processing_result.host_draw_vertex_count) {
+       // Nothing to draw.
+@@ -3800,6 +3807,7 @@
+     }
+ 
+     // Shader modifications.
++    RcompProfScope rcomp_prof_modifications(46);
+     vertex_shader_modification = pipeline_cache_->GetCurrentVertexShaderModification(
+         *vertex_shader, primitive_processing_result.host_vertex_shader_type, interpolator_mask,
+         ps_param_gen_pos != UINT32_MAX);
+@@ -3897,13 +3905,19 @@
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+-  texture_cache_->RequestTextures(used_texture_mask);
++  {
++    RcompProfScope rcomp_prof_textures(40);
++    texture_cache_->RequestTextures(used_texture_mask);
++  }
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
+   // Set up the render targets - this may perform dispatches and draws.
+-  if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+-                                    normalized_color_mask, *vertex_shader)) {
+-    return draw_fail("render_target_update");
++  {
++    RcompProfScope rcomp_prof_render_targets(32);
++    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
++                                      normalized_color_mask, *vertex_shader)) {
++      return draw_fail("render_target_update");
++    }
+   }
+ 
+   // Create the pipeline (for this, need the render pass from the render target
+@@ -3911,12 +3925,15 @@
+   // textures.
+   VkPipeline pipeline;
+   void* pipeline_handle = nullptr;
+-  if (!pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
+-                                          primitive_processing_result, normalized_depth_control,
+-                                          normalized_color_mask,
+-                                          render_target_cache_->last_update_render_pass_key(),
+-                                          pipeline, pipeline_layout_provider, &pipeline_handle)) {
+-    return draw_fail("configure_pipeline");
++  {
++    RcompProfScope rcomp_prof_pipeline(42);
++    if (!pipeline_cache_->ConfigurePipeline(vertex_shader_translation, pixel_shader_translation,
++                                            primitive_processing_result, normalized_depth_control,
++                                            normalized_color_mask,
++                                            render_target_cache_->last_update_render_pass_key(),
++                                            pipeline, pipeline_layout_provider, &pipeline_handle)) {
++      return draw_fail("configure_pipeline");
++    }
+   }
+   bool pipeline_is_placeholder = false;
+   // Reload the current handle state to observe async hot-swap completions that
+@@ -3990,15 +4007,21 @@
+   // life. Or even disregard the viewport bounds range in the fragment shader
+   // interlocks case completely - apply the viewport and the scissor offset
+   // directly to pixel address and to things like ps_param_gen.
+-  draw_util::GetHostViewportInfo(
+-      regs, draw_resolution_scale_x, draw_resolution_scale_y, false,
+-      device_properties.maxViewportDimensions[0], device_properties.maxViewportDimensions[1], true,
+-      normalized_depth_control,
+-      host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader(),
+-      host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
++  {
++    RcompProfScope rcomp_prof_viewport(52);
++    draw_util::GetHostViewportInfo(
++        regs, draw_resolution_scale_x, draw_resolution_scale_y, false,
++        device_properties.maxViewportDimensions[0], device_properties.maxViewportDimensions[1], true,
++        normalized_depth_control,
++        host_render_targets_used && render_target_cache_->depth_float24_convert_in_pixel_shader(),
++        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
++  }
+ 
+   // Update dynamic graphics pipeline state.
+-  UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);
++  {
++    RcompProfScope rcomp_prof_dynamic(54);
++    UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);
++  }
+ 
+   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+ 
+@@ -4032,9 +4055,12 @@
+   }
+ 
+   // Update system constants before uploading them.
+-  UpdateSystemConstantValues(primitive_polygonal, primitive_processing_result,
+-                             shader_32bit_index_dma, 0, viewport_info, used_texture_mask,
+-                             normalized_depth_control, normalized_color_mask);
++  {
++    RcompProfScope rcomp_prof_system_constants(56);
++    UpdateSystemConstantValues(primitive_polygonal, primitive_processing_result,
++                               shader_32bit_index_dma, 0, viewport_info, used_texture_mask,
++                               normalized_depth_control, normalized_color_mask);
++  }
+ #if RCOMP_XENOS_RENDER_DIAGNOSTICS
+   if (::rcomp::xenos::RenderDiagnostics().InWindow(GetCurrentFrame())) {
+     using namespace ::rcomp::xenos;
+@@ -4130,11 +4156,15 @@
+ 
+   // Update uniform buffers and descriptor sets after binding the pipeline with
+   // the new layout.
+-  if (!UpdateBindings(vertex_shader, pixel_shader)) {
+-    return draw_fail("update_bindings");
++  {
++    RcompProfScope rcomp_prof_bindings(38);
++    if (!UpdateBindings(vertex_shader, pixel_shader)) {
++      return draw_fail("update_bindings");
++    }
+   }
+ 
+   // Ensure vertex buffers are resident.
++  RcompProfScope rcomp_prof_buffers(48);
+   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+     uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+@@ -4382,6 +4412,60 @@
+     }
+   }
+ #endif
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  if (RcompEventsOpen()) {
++    // Input of the draw-run summaries of the event timeline (see RcompDrawEvent).
++    using namespace rcomp_draw_flags;
++    RcompDrawEventInfo info = {};
++    for (uint32_t i = 0; i < 5; ++i) {
++      const auto& claim = render_target_cache_->rcomp_last_claims_[i];
++      info.rt_key[i] = claim.key;
++      info.claim_base[i] = claim.base;
++      info.claim_length[i] = claim.length;
++    }
++    info.prim_type = uint32_t(prim_type);
++    info.vertices = primitive_processing_result.host_draw_vertex_count;
++    uint32_t flags = 0;
++    if (normalized_depth_control.z_enable) {
++      flags |= normalized_depth_control.zfunc == xenos::CompareFunction::kAlways ? kZAlways : kZRead;
++      if (normalized_depth_control.z_write_enable) flags |= kZWrite;
++    }
++    if (normalized_depth_control.stencil_enable) flags |= kStencil;
++    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++      const uint32_t write_mask = (normalized_color_mask >> (4 * i)) & 0xF;
++      if (!write_mask) continue;
++      if (write_mask != 0xF) flags |= kPartialColorMask;
++      const auto blend = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++      const auto reads_destination = [](xenos::BlendFactor source, xenos::BlendFactor destination,
++                                        xenos::BlendOp op) {
++        return op == xenos::BlendOp::kMin || op == xenos::BlendOp::kMax ||
++               destination != xenos::BlendFactor::kZero || source == xenos::BlendFactor::kDstColor ||
++               source == xenos::BlendFactor::kOneMinusDstColor || source == xenos::BlendFactor::kDstAlpha ||
++               source == xenos::BlendFactor::kOneMinusDstAlpha;
++      };
++      if (reads_destination(blend.color_srcblend, blend.color_destblend, blend.color_comb_fcn) ||
++          reads_destination(blend.alpha_srcblend, blend.alpha_destblend, blend.alpha_comb_fcn))
++        flags |= kBlend;
++    }
++    if (!pixel_shader) flags |= kNoPixelShader;
++    if (pixel_shader && pixel_shader->kills_pixels()) flags |= kKills;
++    if (pixel_shader && pixel_shader->writes_depth()) flags |= kWritesDepth;
++    if (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) flags |= kClipDisabled;
++    if (prim_type == xenos::PrimitiveType::kRectangleList) flags |= kRectList;
++    info.flags = flags;
++    draw_util::Scissor event_scissor;
++    draw_util::GetScissor(regs, event_scissor);
++    info.scissor[0] = int32_t(event_scissor.offset[0]);
++    info.scissor[1] = int32_t(event_scissor.offset[1]);
++    info.scissor[2] = int32_t(event_scissor.offset[0] + event_scissor.extent[0]);
++    info.scissor[3] = int32_t(event_scissor.offset[1] + event_scissor.extent[1]);
++    info.viewport[0] = int32_t(viewport_info.xy_offset[0] / draw_resolution_scale_x);
++    info.viewport[1] = int32_t(viewport_info.xy_offset[1] / draw_resolution_scale_y);
++    info.viewport[2] = int32_t(viewport_info.xy_extent[0] / draw_resolution_scale_x);
++    info.viewport[3] = int32_t(viewport_info.xy_extent[1] / draw_resolution_scale_y);
++    RcompDrawEvent(info);
++  }
++#endif
+   RcompDrawReason(0);
+   return true;
+ }
+@@ -4603,8 +4687,12 @@
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+     uint32_t written_address, written_length;
+     RcompGpuMark(2);
+-    const bool resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                                        written_address, written_length);
++    bool resolved;
++    {
++      RcompProfScope rcomp_prof_resolve(36);
++      resolved = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
++                                               written_address, written_length);
++    }
+     RcompGpuMark(0);
+     return resolved;
+   }
+@@ -5332,18 +5420,30 @@
+ extern "C" std::atomic<uint64_t> rcomp_fence_sites[8][2];
+ namespace rex::graphics::vulkan {
+ namespace {
++// Labels below kFirstPassLabel are the categories of RcompGpuMark's documentation; a label from
++// kFirstPassLabel on names a pass of the submission (RcompPassBegin): its index in `passes` plus
++// kFirstPassLabel.
++constexpr uint32_t kRcompFirstPassLabel = 16;
++struct RcompPassRecord {
++  uint64_t class_key;
++  uint64_t pixels;
++  uint32_t tiles;
++  uint32_t category;
++};
+ struct RcompGpuProfile {
+   static constexpr uint32_t kSlice = 16384, kSlices = 8;
+   VkQueryPool pool = VK_NULL_HANDLE;
+   bool failed = false;
+   uint32_t slice = 0, used = 0;
+   uint64_t open_submission = 0;
+-  std::vector<uint8_t> labels;
++  std::vector<uint16_t> labels;
++  std::vector<RcompPassRecord> passes;
+   struct Pending {
+     uint64_t submission;
+     uint32_t slice, count;
+-    std::vector<uint8_t> labels;
++    std::vector<uint16_t> labels;
+     uint64_t cpu_submit;
++    std::vector<RcompPassRecord> passes;
+   };
+   uint32_t traced = 0;
+   std::deque<Pending> pending;
+@@ -5357,8 +5457,111 @@
+     return;
+   deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g.pool,
+                                                g.slice * RcompGpuProfile::kSlice + g.used);
+-  g.labels.push_back(uint8_t(label));
++  g.labels.push_back(uint16_t(label));
+   ++g.used;
++}
++
++void VulkanCommandProcessor::RcompPassBegin(uint64_t class_key, uint64_t pixels, uint32_t tiles,
++                                            uint32_t category) {
++  auto& g = rcomp_gpu_profile;
++  if (!submission_open_ || g.pool == VK_NULL_HANDLE || g.open_submission != GetCurrentSubmission() ||
++      g.used >= RcompGpuProfile::kSlice || g.passes.size() >= 0xFFFFu - kRcompFirstPassLabel)
++    return;
++  RcompGpuMark(kRcompFirstPassLabel + uint32_t(g.passes.size()));
++  g.passes.push_back({class_key, pixels, tiles, category});
++}
++
++void VulkanCommandProcessor::RcompPassEnd(uint32_t category) {
++  RcompGpuMark(category);
++}
++
++namespace {
++// Bounded event timeline (RCOMP-EV lines): the draw runs, render target transfers and resolves of a
++// few consecutive guest frames at several points of the run, in command order, for offline analysis
++// (tools/xenos_pass_analysis.py). A draw run is a stretch of draws with the same render targets and
++// the same state classes (rcomp_draw_flags); the lines are
++//   D+ n= f= rts=<depth>,<c0>..<c3> prim= flags= sc=<l,t,r,b> vp=<x,y,w,h>   first draw of a run
++//   D- n= draws= verts= zr= zw= st= bl= pm= nops= kill= clip= zalways= rect= wd= claim=<base+len>,...
++//   T  n= f= dest= src= hd= t=<a>..<b> r=<x,y+wxh>... cl=       one transfer (see render_target_cache.cpp)
++//   R  n= f= ...                                                one resolve
++constexpr uint64_t kRcompEventStarts[] = {1500, 3500, 5500, 7500, 9500, 11500};
++constexpr uint64_t kRcompEventFrames = 2;
++struct RcompDrawRun {
++  bool open = false;
++  uint64_t frame = 0, seq = 0;
++  uint32_t rt[5] = {};
++  uint32_t flags = 0;
++  uint32_t draws = 0, vertices = 0, z_read = 0, z_write = 0, stencil = 0, blend = 0, partial_mask = 0, no_ps = 0,
++           kills = 0, clip_off = 0, z_always = 0, rect = 0, writes_depth = 0;
++  uint32_t claim_base[5] = {}, claim_length[5] = {};
++} rcomp_run;
++uint64_t rcomp_event_seq = 0;
++}  // namespace
++
++uint64_t VulkanCommandProcessor::RcompNextEventSeq() { return ++rcomp_event_seq; }
++
++bool VulkanCommandProcessor::RcompEventsOpen() {
++  bool open = false;
++  for (const uint64_t start : kRcompEventStarts)
++    if (frame_current_ >= start && frame_current_ < start + kRcompEventFrames) {
++      open = true;
++      break;
++    }
++  if (!open && rcomp_run.open) RcompFlushDrawRun();
++  return open;
++}
++
++void VulkanCommandProcessor::RcompFlushDrawRun() {
++  RcompDrawRun& r = rcomp_run;
++  if (!r.open) return;
++  r.open = false;
++  std::fprintf(stderr,
++               "RCOMP-EV D- n=%llu draws=%u verts=%u zr=%u zw=%u st=%u bl=%u pm=%u nops=%u kill=%u clip=%u zalways=%u rect=%u wd=%u "
++               "claim=%u+%u,%u+%u,%u+%u,%u+%u,%u+%u\n",
++               (unsigned long long)r.seq, r.draws, r.vertices, r.z_read, r.z_write, r.stencil, r.blend, r.partial_mask,
++               r.no_ps, r.kills, r.clip_off, r.z_always, r.rect, r.writes_depth, r.claim_base[0], r.claim_length[0],
++               r.claim_base[1], r.claim_length[1], r.claim_base[2], r.claim_length[2], r.claim_base[3],
++               r.claim_length[3], r.claim_base[4], r.claim_length[4]);
++}
++
++void VulkanCommandProcessor::RcompDrawEvent(const RcompDrawEventInfo& d) {
++  if (!RcompEventsOpen()) return;
++  RcompDrawRun& r = rcomp_run;
++  const bool same = r.open && r.frame == frame_current_ && !std::memcmp(r.rt, d.rt_key, sizeof(r.rt)) &&
++                    r.flags == d.flags;
++  if (!same) {
++    RcompFlushDrawRun();
++    r = RcompDrawRun();
++    r.open = true;
++    r.frame = frame_current_;
++    r.seq = RcompNextEventSeq();
++    std::memcpy(r.rt, d.rt_key, sizeof(r.rt));
++    r.flags = d.flags;
++    char key[5][32];
++    for (int i = 0; i < 5; ++i) rcomp_pass::KeyText(d.rt_key[i], key[i]);
++    std::fprintf(stderr, "RCOMP-EV D+ n=%llu f=%llu rts=%s,%s,%s,%s,%s prim=%u flags=%x sc=%d,%d,%d,%d vp=%d,%d,%d,%d\n",
++                 (unsigned long long)r.seq, (unsigned long long)frame_current_, key[0], key[1], key[2], key[3], key[4],
++                 d.prim_type, d.flags, d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3], d.viewport[0],
++                 d.viewport[1], d.viewport[2], d.viewport[3]);
++  }
++  using namespace rcomp_draw_flags;
++  ++r.draws;
++  r.vertices += d.vertices;
++  r.z_read += (d.flags & kZRead) != 0;
++  r.z_write += (d.flags & kZWrite) != 0;
++  r.stencil += (d.flags & kStencil) != 0;
++  r.blend += (d.flags & kBlend) != 0;
++  r.partial_mask += (d.flags & kPartialColorMask) != 0;
++  r.no_ps += (d.flags & kNoPixelShader) != 0;
++  r.kills += (d.flags & kKills) != 0;
++  r.clip_off += (d.flags & kClipDisabled) != 0;
++  r.z_always += (d.flags & kZAlways) != 0;
++  r.rect += (d.flags & kRectList) != 0;
++  r.writes_depth += (d.flags & kWritesDepth) != 0;
++  for (int i = 0; i < 5; ++i) {
++    r.claim_base[i] = d.claim_base[i];
++    r.claim_length[i] = std::max(r.claim_length[i], d.claim_length[i]);
++  }
+ }
+ 
+ static void RcompGpuProfileBegin(VulkanCommandProcessor& cp, const ui::vulkan::VulkanDevice* vulkan_device,
+@@ -5381,6 +5584,7 @@
+   g.slice = (g.slice + 1) % RcompGpuProfile::kSlices;
+   g.used = 0;
+   g.labels.clear();
++  g.passes.clear();
+   g.open_submission = cp.GetCurrentSubmission();
+   dcb.CmdVkResetQueryPool(g.pool, g.slice * RcompGpuProfile::kSlice, RcompGpuProfile::kSlice);
+ }
+@@ -5391,9 +5595,75 @@
+     g.open_submission = 0;
+     return;
+   }
+-  g.pending.push_back({submission, g.slice, g.used, g.labels, __rdtsc()});
++  g.pending.push_back({submission, g.slice, g.used, g.labels, __rdtsc(), g.passes});
+   g.open_submission = 0;
+ }
++
++namespace {
++// GPU time and work per pass class (rcomp_pass:: keys), summed over the run on the CP thread.
++struct RcompClassStat {
++  uint64_t count = 0, ticks = 0, pixels = 0, tiles = 0;
++};
++std::unordered_map<uint64_t, RcompClassStat> rcomp_pass_classes;
++
++std::string RcompDescribeRt(uint32_t type) {
++  const uint32_t msaa = type & 3, is_depth = (type >> 2) & 1, format = type >> 3;
++  char text[64];
++  std::snprintf(text, sizeof text, "%s:%s/%ux", is_depth ? "D" : "C",
++                is_depth ? xenos::GetDepthRenderTargetFormatName(xenos::DepthRenderTargetFormat(format))
++                         : xenos::GetColorRenderTargetFormatName(xenos::ColorRenderTargetFormat(format)),
++                1u << msaa);
++  return text;
++}
++
++std::string RcompDescribeClass(uint64_t key) {
++  char text[160];
++  switch (key & 0xF) {
++    case rcomp_pass::kTransfer:
++      std::snprintf(text, sizeof text, "transfer dest=%s src=%s mode=%u hostdepth=%u",
++                    RcompDescribeRt(uint32_t(key >> 4) & 0x7F).c_str(),
++                    RcompDescribeRt(uint32_t(key >> 11) & 0x7F).c_str(), uint32_t(key >> 18) & 0x1F,
++                    uint32_t(key >> 23) & 1);
++      break;
++    case rcomp_pass::kHostDepthStore:
++      std::snprintf(text, sizeof text, "host-depth-store dest=%s", RcompDescribeRt(uint32_t(key >> 4) & 0x7F).c_str());
++      break;
++    case rcomp_pass::kResolveDump:
++      std::snprintf(text, sizeof text, "resolve-dump rt=%s", RcompDescribeRt(uint32_t(key >> 4) & 0x7F).c_str());
++      break;
++    case rcomp_pass::kResolveCopy:
++      std::snprintf(text, sizeof text, "resolve-copy shader=%u scaled=%u", uint32_t(key >> 4) & 0xFF,
++                    uint32_t(key >> 12) & 1);
++      break;
++    case rcomp_pass::kResolveClear:
++      std::snprintf(text, sizeof text, "resolve-clear rt=%s", RcompDescribeRt(uint32_t(key >> 4) & 0x7F).c_str());
++      break;
++    default:
++      std::snprintf(text, sizeof text, "kind=%u", uint32_t(key & 0xF));
++  }
++  return text;
++}
++
++// Cumulative class table every 20 s of wall time (differences of two tables give the rate between them).
++void RcompPassDump() {
++  static const auto start = std::chrono::steady_clock::now();
++  static auto next = start + std::chrono::seconds(20);
++  const auto now = std::chrono::steady_clock::now();
++  if (now < next || rcomp_pass_classes.empty()) return;
++  next = now + std::chrono::seconds(20);
++  std::vector<std::pair<uint64_t, RcompClassStat>> rows(rcomp_pass_classes.begin(), rcomp_pass_classes.end());
++  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.ticks > b.second.ticks; });
++  std::fprintf(stderr, "RCOMP-PASS-TABLE wall_ms=%llu swaps=%llu classes=%zu\n",
++               (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count(),
++               (unsigned long long)rcomp_prof[22].load(std::memory_order_relaxed), rows.size());
++  for (size_t i = 0; i < rows.size() && i < 64; ++i) {
++    const auto& s = rows[i].second;
++    std::fprintf(stderr, "RCOMP-PASS key=%llx n=%llu ticks=%llu px=%llu tiles=%llu %s\n",
++                 (unsigned long long)rows[i].first, (unsigned long long)s.count, (unsigned long long)s.ticks,
++                 (unsigned long long)s.pixels, (unsigned long long)s.tiles, RcompDescribeClass(rows[i].first).c_str());
++  }
++}
++}  // namespace
+ 
+ static void RcompGpuProfileCollect(const ui::vulkan::VulkanDevice* vulkan_device, uint64_t completed) {
+   auto& g = rcomp_gpu_profile;
+@@ -5406,10 +5676,25 @@
+                                   VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+       for (uint32_t i = 1; i < p.count; ++i)
+       {
++        const uint32_t label = p.labels[i - 1];
++        uint32_t category = label & 7;
++        const RcompPassRecord* pass = nullptr;
++        if (label >= kRcompFirstPassLabel && label - kRcompFirstPassLabel < p.passes.size()) {
++          pass = &p.passes[label - kRcompFirstPassLabel];
++          category = pass->category & 7;
++        }
+         if (ts[i] >= ts[i - 1])
+-          rcomp_gpu_ticks[p.labels[i - 1] & 7].fetch_add(ts[i] - ts[i - 1], std::memory_order_relaxed);
+-        rcomp_gpu_marks[p.labels[i - 1] & 7].fetch_add(1, std::memory_order_relaxed);
+-      }
++          rcomp_gpu_ticks[category].fetch_add(ts[i] - ts[i - 1], std::memory_order_relaxed);
++        rcomp_gpu_marks[category].fetch_add(1, std::memory_order_relaxed);
++        if (pass && ts[i] >= ts[i - 1]) {
++          RcompClassStat& stat = rcomp_pass_classes[pass->class_key];
++          ++stat.count;
++          stat.ticks += ts[i] - ts[i - 1];
++          stat.pixels += pass->pixels;
++          stat.tiles += pass->tiles;
++        }
++      }
++      RcompPassDump();
+       rcomp_gpu_ticks[7].fetch_add(ts[p.count - 1] - ts[0], std::memory_order_relaxed);
+       // Sampled trace (every 8th submission, runs of 4 every 400): CPU TSC at submission and
+       // when completion was observed, GPU clock at start/end.
+@@ -5866,6 +6151,18 @@
+   single_transient_descriptors_used_.clear();
+   transient_descriptor_allocator_storage_buffer_.Reset();
+   transient_descriptor_allocator_uniform_buffer_.Reset();
++
++  // The persistent guest constants sets refer to uniform buffer pool pages; the pages are destroyed
++  // right after this (cache clear) or with the pool (shutdown), the pool is idle.
++  constants_page_descriptor_sets_.clear();
++  if (!constants_page_descriptor_pools_.empty()) {
++    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++    for (VkDescriptorPool pool : constants_page_descriptor_pools_) {
++      dfn.vkDestroyDescriptorPool(vulkan_device->device(), pool, nullptr);
++    }
++    constants_page_descriptor_pools_.clear();
++  }
+ }
+ 
+ void VulkanCommandProcessor::SplitPendingBarrier() {
+@@ -6782,9 +7079,12 @@
+   constexpr uint32_t kAllConstantBuffersMask =
+       (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferCount) - 1;
+   assert_zero(current_constant_buffers_up_to_date_ & ~kAllConstantBuffersMask);
+-  if ((current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask) {
+-    current_graphics_descriptor_set_values_up_to_date_ &=
+-        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
++  const bool constants_changed =
++      (current_constant_buffers_up_to_date_ & kAllConstantBuffersMask) != kAllConstantBuffersMask;
++  // The five constant buffers of a draw are bound through one descriptor set, which refers to one
++  // uniform buffer pool page: if the pool moves to a new page in the middle of the uploads, they are
++  // all uploaded again (the new page has room for all of them), so at most two attempts are needed.
++  for (uint32_t constants_attempt = 0; constants_changed; ++constants_attempt) {
+     size_t uniform_buffer_alignment =
+         size_t(vulkan_device->properties().minUniformBufferOffsetAlignment);
+     // System constants.
+@@ -6792,8 +7092,7 @@
+           (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem))) {
+       VkDescriptorBufferInfo& buffer_info =
+           current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferSystem];
+-      uint8_t* mapping = uniform_buffer_pool_->Request(
+-          frame_current_, sizeof(SpirvShaderTranslator::SystemConstants), uniform_buffer_alignment,
++      uint8_t* mapping = RequestConstants(sizeof(SpirvShaderTranslator::SystemConstants), uniform_buffer_alignment,
+           buffer_info.buffer, buffer_info.offset);
+       if (!mapping) {
+         return false;
+@@ -6815,7 +7114,7 @@
+       // dummy buffer.
+       size_t float_constants_size =
+           sizeof(float) * 4 * std::max(float_constant_count_vertex, UINT32_C(1));
+-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
++      uint8_t* mapping = RequestConstants(float_constants_size,
+                                                        uniform_buffer_alignment, buffer_info.buffer,
+                                                        buffer_info.offset);
+       if (!mapping) {
+@@ -6844,7 +7143,7 @@
+           current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFloatPixel];
+       size_t float_constants_size =
+           sizeof(float) * 4 * std::max(float_constant_count_pixel, UINT32_C(1));
+-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, float_constants_size,
++      uint8_t* mapping = RequestConstants(float_constants_size,
+                                                        uniform_buffer_alignment, buffer_info.buffer,
+                                                        buffer_info.offset);
+       if (!mapping) {
+@@ -6872,7 +7171,7 @@
+       VkDescriptorBufferInfo& buffer_info =
+           current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferBoolLoop];
+       constexpr size_t kBoolLoopConstantsSize = sizeof(uint32_t) * (8 + 32);
+-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, kBoolLoopConstantsSize,
++      uint8_t* mapping = RequestConstants(kBoolLoopConstantsSize,
+                                                        uniform_buffer_alignment, buffer_info.buffer,
+                                                        buffer_info.offset);
+       if (!mapping) {
+@@ -6889,7 +7188,7 @@
+       VkDescriptorBufferInfo& buffer_info =
+           current_constant_buffer_infos_[SpirvShaderTranslator::kConstantBufferFetch];
+       constexpr size_t kFetchConstantsSize = sizeof(uint32_t) * 6 * 32;
+-      uint8_t* mapping = uniform_buffer_pool_->Request(frame_current_, kFetchConstantsSize,
++      uint8_t* mapping = RequestConstants(kFetchConstantsSize,
+                                                        uniform_buffer_alignment, buffer_info.buffer,
+                                                        buffer_info.offset);
+       if (!mapping) {
+@@ -6900,6 +7199,19 @@
+       current_constant_buffers_up_to_date_ |= UINT32_C(1)
+                                               << SpirvShaderTranslator::kConstantBufferFetch;
+     }
++    bool constants_in_one_page = true;
++    for (uint32_t i = 1; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
++      constants_in_one_page &= current_constant_buffer_infos_[i].buffer ==
++                               current_constant_buffer_infos_[0].buffer;
++    }
++    if (constants_in_one_page) {
++      break;
++    }
++    if (constants_attempt) {
++      REXGPU_ERROR("The guest constants could not be placed in one uniform buffer page");
++      return false;
++    }
++    current_constant_buffers_up_to_date_ = 0;
+   }
+ 
+   // Textures and samplers.
+@@ -7011,42 +7323,23 @@
+   uint32_t write_descriptor_set_bits = 0;
+   assert_not_zero(current_graphics_descriptor_set_values_up_to_date_ &
+                   (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram));
+-  // Constant buffers.
+-  if (!(current_graphics_descriptor_set_values_up_to_date_ &
+-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants))) {
+-    VkDescriptorSet constants_descriptor_set;
+-    if (!constants_transient_descriptors_free_.empty()) {
+-      constants_descriptor_set = constants_transient_descriptors_free_.back();
+-      constants_transient_descriptors_free_.pop_back();
+-    } else {
+-      VkDescriptorPoolSize constants_descriptor_count;
+-      constants_descriptor_count.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+-      constants_descriptor_count.descriptorCount = SpirvShaderTranslator::kConstantBufferCount;
+-      constants_descriptor_set = transient_descriptor_allocator_uniform_buffer_.Allocate(
+-          descriptor_set_layout_constants_, &constants_descriptor_count, 1);
+-      if (constants_descriptor_set == VK_NULL_HANDLE) {
+-        return false;
+-      }
+-    }
+-    constants_transient_descriptors_used_.emplace_back(frame_current_, constants_descriptor_set);
+-    // Consecutive bindings updated via a single VkWriteDescriptorSet must have
+-    // identical stage flags, but for the constants they vary.
++  // Constant buffers: the persistent set of the uniform buffer pool page, bound with dynamic offsets.
++  if (constants_changed) {
++    VkDescriptorSet constants_descriptor_set =
++        GetConstantsDescriptorSet(current_constant_buffer_infos_[0].buffer);
++    if (constants_descriptor_set == VK_NULL_HANDLE) {
++      return false;
++    }
+     for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+-      VkWriteDescriptorSet& write_constants = write_descriptor_sets[write_descriptor_set_count++];
+-      write_constants.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+-      write_constants.pNext = nullptr;
+-      write_constants.dstSet = constants_descriptor_set;
+-      write_constants.dstBinding = i;
+-      write_constants.dstArrayElement = 0;
+-      write_constants.descriptorCount = 1;
+-      write_constants.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+-      write_constants.pImageInfo = nullptr;
+-      write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
+-      write_constants.pTexelBufferView = nullptr;
+-    }
+-    write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
++      constants_dynamic_offsets_[i] = uint32_t(current_constant_buffer_infos_[i].offset);
++    }
+     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
+         constants_descriptor_set;
++    current_graphics_descriptor_set_values_up_to_date_ |=
++        UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
++    // The dynamic offsets are part of the binding.
++    current_graphics_descriptor_sets_bound_up_to_date_ &=
++        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants);
+   }
+   // Vertex shader textures and samplers.
+   if (write_vertex_textures) {
+@@ -7115,11 +7408,17 @@
+   while (rex::bit_scan_forward(descriptor_sets_remaining, &descriptor_set_index)) {
+     uint32_t descriptor_set_mask_tzcnt =
+         rex::tzcnt(~(descriptor_sets_remaining | ((UINT32_C(1) << descriptor_set_index) - 1)));
++    // Only the constants set has dynamic descriptors, so its five offsets are all of the batch.
++    const bool batch_has_constants =
++        descriptor_set_index <= uint32_t(SpirvShaderTranslator::kDescriptorSetConstants) &&
++        uint32_t(SpirvShaderTranslator::kDescriptorSetConstants) < descriptor_set_mask_tzcnt;
+     deferred_command_buffer_.CmdVkBindDescriptorSets(
+         VK_PIPELINE_BIND_POINT_GRAPHICS,
+         current_guest_graphics_pipeline_layout_->GetPipelineLayout(), descriptor_set_index,
+         descriptor_set_mask_tzcnt - descriptor_set_index,
+-        current_graphics_descriptor_sets_ + descriptor_set_index, 0, nullptr);
++        current_graphics_descriptor_sets_ + descriptor_set_index,
++        batch_has_constants ? uint32_t(SpirvShaderTranslator::kConstantBufferCount) : 0,
++        batch_has_constants ? constants_dynamic_offsets_ : nullptr);
+     if (descriptor_set_mask_tzcnt >= 32) {
+       break;
+     }
+@@ -7128,6 +7427,113 @@
+   current_graphics_descriptor_sets_bound_up_to_date_ |= descriptor_sets_needed;
+ 
+   return true;
++}
++
++uint8_t* VulkanCommandProcessor::RequestConstants(size_t size, size_t alignment, VkBuffer& buffer_out,
++                                                 VkDeviceSize& offset_out) {
++  // The pages are ui::GraphicsUploadBufferPool::kDefaultPageSize (2 MiB) or larger; this only
++  // assumes the smaller size.
++  constexpr size_t kPageBytes = ui::GraphicsUploadBufferPool::kDefaultPageSize;
++  constexpr size_t kLargestRange = sizeof(float) * 4 * 256;
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    uint8_t* mapping =
++        uniform_buffer_pool_->Request(frame_current_, size, alignment, buffer_out, offset_out);
++    if (!mapping) {
++      return nullptr;
++    }
++    if (size_t(offset_out) + kLargestRange <= kPageBytes) {
++      return mapping;
++    }
++    // Skip what is left of the page so that the next request starts a new one.
++    const size_t aligned_end = (size_t(offset_out) + size + alignment - 1) & ~(alignment - 1);
++    const size_t rest = (kPageBytes > aligned_end ? kPageBytes - aligned_end : 0) & ~(alignment - 1);
++    if (rest) {
++      VkBuffer skipped_buffer;
++      VkDeviceSize skipped_offset;
++      uniform_buffer_pool_->Request(frame_current_, rest, alignment, skipped_buffer, skipped_offset);
++    }
++  }
++  return nullptr;
++}
++
++VkDescriptorSet VulkanCommandProcessor::GetConstantsDescriptorSet(VkBuffer page_buffer) {
++  auto found = constants_page_descriptor_sets_.find(page_buffer);
++  if (found != constants_page_descriptor_sets_.end()) {
++    return found->second;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  VkDescriptorSetAllocateInfo allocate_info;
++  allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
++  allocate_info.pNext = nullptr;
++  allocate_info.descriptorSetCount = 1;
++  allocate_info.pSetLayouts = &descriptor_set_layout_constants_;
++  VkDescriptorSet set = VK_NULL_HANDLE;
++  for (int attempt = 0; attempt < 2 && set == VK_NULL_HANDLE; ++attempt) {
++    if (constants_page_descriptor_pools_.empty() || attempt) {
++      constexpr uint32_t kSetsPerPool = 256;
++      VkDescriptorPoolSize pool_size;
++      pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
++      pool_size.descriptorCount = SpirvShaderTranslator::kConstantBufferCount * kSetsPerPool;
++      VkDescriptorPoolCreateInfo pool_create_info;
++      pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
++      pool_create_info.pNext = nullptr;
++      pool_create_info.flags = 0;
++      pool_create_info.maxSets = kSetsPerPool;
++      pool_create_info.poolSizeCount = 1;
++      pool_create_info.pPoolSizes = &pool_size;
++      VkDescriptorPool pool;
++      if (dfn.vkCreateDescriptorPool(device, &pool_create_info, nullptr, &pool) != VK_SUCCESS) {
++        REXGPU_ERROR("Failed to create a Vulkan descriptor pool for the guest constants");
++        return VK_NULL_HANDLE;
++      }
++      constants_page_descriptor_pools_.push_back(pool);
++    }
++    allocate_info.descriptorPool = constants_page_descriptor_pools_.back();
++    if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &set) != VK_SUCCESS) {
++      set = VK_NULL_HANDLE;
++    }
++  }
++  if (set == VK_NULL_HANDLE) {
++    REXGPU_ERROR("Failed to allocate a Vulkan descriptor set for the guest constants");
++    return VK_NULL_HANDLE;
++  }
++  // The largest range of each constant buffer: the shader only reads what the draw uploaded.
++  const VkDeviceSize ranges[SpirvShaderTranslator::kConstantBufferCount] = {
++      /* system */ sizeof(SpirvShaderTranslator::SystemConstants),
++      /* float vertex */ sizeof(float) * 4 * 256,
++      /* float pixel */ sizeof(float) * 4 * 256,
++      /* bool and loop */ sizeof(uint32_t) * (8 + 32),
++      /* fetch */ sizeof(uint32_t) * 6 * 32,
++  };
++  static_assert(SpirvShaderTranslator::kConstantBufferSystem == 0 &&
++                    SpirvShaderTranslator::kConstantBufferFloatVertex == 1 &&
++                    SpirvShaderTranslator::kConstantBufferFloatPixel == 2 &&
++                    SpirvShaderTranslator::kConstantBufferBoolLoop == 3 &&
++                    SpirvShaderTranslator::kConstantBufferFetch == 4,
++                "The ranges above are listed in the order of the constant buffer indices");
++  VkDescriptorBufferInfo buffer_infos[SpirvShaderTranslator::kConstantBufferCount];
++  VkWriteDescriptorSet writes[SpirvShaderTranslator::kConstantBufferCount];
++  for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
++    buffer_infos[i].buffer = page_buffer;
++    buffer_infos[i].offset = 0;
++    buffer_infos[i].range = ranges[i];
++    VkWriteDescriptorSet& write = writes[i];
++    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++    write.pNext = nullptr;
++    write.dstSet = set;
++    write.dstBinding = i;
++    write.dstArrayElement = 0;
++    write.descriptorCount = 1;
++    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
++    write.pImageInfo = nullptr;
++    write.pBufferInfo = &buffer_infos[i];
++    write.pTexelBufferView = nullptr;
++  }
++  dfn.vkUpdateDescriptorSets(device, SpirvShaderTranslator::kConstantBufferCount, writes, 0, nullptr);
++  constants_page_descriptor_sets_.emplace(page_buffer, set);
++  return set;
+ }
+ 
+ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
+diff -ruN a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -66,6 +66,23 @@
+ //     "GPU");
+ 
+ namespace rex::graphics::vulkan {
++
++#if RCOMP_XENOS_PROFILE_TIMINGS
++namespace {
++// R-comp pass accounting: the GPU time of the scope is attributed to one pass class (see
++// VulkanCommandProcessor::RcompPassBegin) and falls back to `category` afterwards.
++struct RcompPassScope {
++  VulkanCommandProcessor& command_processor;
++  uint32_t category;
++  RcompPassScope(VulkanCommandProcessor& command_processor_, uint64_t class_key, uint64_t pixels,
++                 uint32_t tiles, uint32_t category_)
++      : command_processor(command_processor_), category(category_) {
++    command_processor.RcompPassBegin(class_key, pixels, tiles, category);
++  }
++  ~RcompPassScope() { command_processor.RcompPassEnd(category); }
++};
++}  // namespace
++#endif
+ 
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+@@ -1168,6 +1185,24 @@
+               int(GetPath()), int(resolve_info.IsClearingColor()), int(resolve_info.IsClearingDepth()),
+               unsigned(resolve_info.copy_dest_info.copy_dest_format));
+   }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  if (command_processor_.RcompEventsOpen()) {  // event timeline (see VulkanCommandProcessor::RcompDrawEvent)
++    command_processor_.RcompFlushDrawRun();
++    uint32_t span_base, span_row_length, span_rows, span_pitch;
++    resolve_info.GetCopyEdramTileSpan(span_base, span_row_length, span_rows, span_pitch);
++    std::fprintf(stderr,
++                 "RCOMP-EV R n=%llu f=%llu src=%u span=%u+%ux%u/%u dest=0x%08X extent=0x%08X+0x%X w=%u h=%u fmt=%u "
++                 "clr=%u%u copy=%u\n",
++                 (unsigned long long)command_processor_.RcompNextEventSeq(),
++                 (unsigned long long)command_processor_.GetCurrentFrame(),
++                 unsigned(resolve_info.rb_copy_control.copy_src_select), span_base, span_row_length, span_rows,
++                 span_pitch, resolve_info.copy_dest_base, resolve_info.copy_dest_extent_start,
++                 resolve_info.copy_dest_extent_length, resolve_info.coordinate_info.width_div_8 * 8,
++                 resolve_info.height_div_8 * 8, unsigned(resolve_info.copy_dest_info.copy_dest_format),
++                 unsigned(resolve_info.IsClearingColor()), unsigned(resolve_info.IsClearingDepth()),
++                 unsigned(resolve_info.copy_dest_extent_length != 0));
++  }
++#endif
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+@@ -1299,6 +1334,13 @@
+           write_descriptor_set_dest.pTexelBufferView = nullptr;
+           dfn.vkUpdateDescriptorSets(device, 1, &write_descriptor_set_dest, 0, nullptr);
+ 
++#if RCOMP_XENOS_PROFILE_TIMINGS
++          // pixels = destination bytes, tiles = dispatch groups.
++          RcompPassScope rcomp_pass_scope(
++              command_processor_,
++              rcomp_pass::CopyClass(uint32_t(copy_shader), draw_resolution_scaled),
++              copy_dest_use_length, copy_group_count_x * copy_group_count_y, 2);
++#endif
+           // Submit the resolve.
+           if (draw_resolution_scaled) {
+             texture_cache.UseScaledResolveBufferForWrite(copy_dest_use_start, copy_dest_use_length);
+@@ -4645,6 +4687,7 @@
+     const std::vector<Transfer>* render_target_transfers,
+     const uint64_t* render_target_resolve_clear_values,
+     const Transfer::Rectangle* resolve_clear_rectangle) {
++  ::rcomp::xenos::ProfScope rcomp_prof_transfers(34);
+   bool rcomp_has_work = render_target_resolve_clear_values && resolve_clear_rectangle;
+   for (uint32_t i = 0; i < render_target_count && !rcomp_has_work; ++i)
+     rcomp_has_work = render_targets[i] && render_target_transfers && !render_target_transfers[i].empty();
+@@ -4670,6 +4713,41 @@
+     }
+   }
+ #endif
++#if RCOMP_XENOS_PROFILE_TIMINGS
++  if (rcomp_has_work && command_processor_.RcompEventsOpen()) {  // event timeline
++    command_processor_.RcompFlushDrawRun();
++    for (uint32_t i = 0; i < render_target_count; ++i) {
++      if (!render_targets[i] || !render_target_transfers) continue;
++      const RenderTargetKey d = render_targets[i]->key();
++      for (const Transfer& t : render_target_transfers[i]) {
++        const RenderTargetKey s = t.source ? t.source->key() : RenderTargetKey();
++        const RenderTargetKey h = t.host_depth_source ? t.host_depth_source->key() : RenderTargetKey();
++        Transfer::Rectangle rects[Transfer::kMaxRectanglesWithCutout];
++        const uint32_t rect_count = t.GetRectangles(d.base_tiles, d.GetPitchTiles(), d.msaa_samples,
++                                                    d.Is64bpp(), rects, resolve_clear_rectangle);
++        char dest_text[32], source_text[32], host_depth_text[32];
++        rcomp_pass::KeyText(d.key, dest_text);
++        rcomp_pass::KeyText(s.key, source_text);
++        rcomp_pass::KeyText(h.key, host_depth_text);
++        std::fprintf(stderr, "RCOMP-EV T n=%llu f=%llu slot=%u dest=%s src=%s hd=%s t=%u..%u cl=%u r=",
++                     (unsigned long long)command_processor_.RcompNextEventSeq(),
++                     (unsigned long long)command_processor_.GetCurrentFrame(), i, dest_text, source_text,
++                     host_depth_text, t.start_tiles, t.end_tiles,
++                     unsigned(render_target_resolve_clear_values != nullptr));
++        for (uint32_t k = 0; k < rect_count; ++k)
++          std::fprintf(stderr, "%s%u,%u+%ux%u", k ? ";" : "", rects[k].x_pixels, rects[k].y_pixels,
++                       rects[k].width_pixels, rects[k].height_pixels);
++        std::fprintf(stderr, "\n");
++      }
++    }
++    if (resolve_clear_rectangle && render_target_resolve_clear_values)
++      std::fprintf(stderr, "RCOMP-EV C n=%llu f=%llu rect=%u,%u+%ux%u\n",
++                   (unsigned long long)command_processor_.RcompNextEventSeq(),
++                   (unsigned long long)command_processor_.GetCurrentFrame(), resolve_clear_rectangle->x_pixels,
++                   resolve_clear_rectangle->y_pixels, resolve_clear_rectangle->width_pixels,
++                   resolve_clear_rectangle->height_pixels);
++  }
++#endif
+   struct RcompMarkDraw {
+     VulkanCommandProcessor& cp;
+     bool active;
+@@ -4716,6 +4794,14 @@
+       if (transfer.host_depth_source != dest_rt) {
+         continue;
+       }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++      // pixels = host samples of the range (80x16 per tile and sample), tiles = tiles.
++      RcompPassScope rcomp_pass_scope(
++          command_processor_, rcomp_pass::HostDepthStoreClass(dest_rt_key.key),
++          uint64_t(transfer.end_tiles - transfer.start_tiles) * 1280 * draw_resolution_scale_x() *
++              draw_resolution_scale_y(),
++          transfer.end_tiles - transfer.start_tiles, 1);
++#endif
+       if (!host_depth_store_set_up) {
+         // Pipeline.
+         command_processor_.BindExternalComputePipeline(
+@@ -5211,6 +5297,26 @@
+         auto host_depth_source_vulkan_rt =
+             static_cast<VulkanRenderTarget*>(it->transfer.host_depth_source);
+         TransferShaderKey transfer_shader_key = it->shader_key;
++#if RCOMP_XENOS_PROFILE_TIMINGS
++        // One pass per merged draw: the GPU time of what is recorded for it until the end of this
++        // iteration (vertex buffer, pipeline and bindings, draw) goes to its class.
++        uint64_t rcomp_pass_pixels = 0;
++        uint32_t rcomp_pass_tiles = 0;
++        for (auto it_merged = it_merged_first; it_merged <= it_merged_last; ++it_merged) {
++          Transfer::Rectangle rcomp_rects[Transfer::kMaxRectanglesWithCutout];
++          const uint32_t rcomp_rect_count = it_merged->transfer.GetRectangles(
++              dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp, rcomp_rects,
++              resolve_clear_rectangle);
++          for (uint32_t k = 0; k < rcomp_rect_count; ++k)
++            rcomp_pass_pixels += uint64_t(rcomp_rects[k].width_pixels) * rcomp_rects[k].height_pixels;
++          rcomp_pass_tiles += it_merged->transfer.end_tiles - it_merged->transfer.start_tiles;
++        }
++        RcompPassScope rcomp_pass_scope(
++            command_processor_,
++            rcomp_pass::TransferClass(dest_rt_key.key, source_vulkan_rt.key().key, uint32_t(transfer_shader_key.mode),
++                                      host_depth_source_vulkan_rt != nullptr),
++            rcomp_pass_pixels * draw_resolution_scale_x() * draw_resolution_scale_y(), rcomp_pass_tiles, 1);
++#endif
+         const TransferModeInfo& transfer_mode_info =
+             kTransferModes[size_t(transfer_shader_key.mode)];
+         TransferPipelineLayoutIndex transfer_pipeline_layout_index =
+@@ -5480,6 +5586,11 @@
+ 
+     // Perform the clear.
+     if (resolve_clear_needed) {
++#if RCOMP_XENOS_PROFILE_TIMINGS
++      RcompPassScope rcomp_pass_scope(
++          command_processor_, rcomp_pass::ClearClass(dest_rt_key.key),
++          uint64_t(resolve_clear_rect.rect.extent.width) * resolve_clear_rect.rect.extent.height, 0, 1);
++#endif
+       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+           transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+       VkClearAttachment resolve_clear_attachment;
+@@ -6321,6 +6432,22 @@
+       all_pipelines_available = false;
+       continue;
+     }
++#if RCOMP_XENOS_PROFILE_TIMINGS
++    // pixels = host samples dumped (80x16 per tile and sample at 32 bpp), tiles = tiles.
++    uint64_t rcomp_dump_tiles = 0;
++    {
++      ResolveCopyDumpRectangle::Dispatch rcomp_dispatches[ResolveCopyDumpRectangle::kMaxDispatches];
++      const uint32_t rcomp_dispatch_count =
++          rectangle.GetDispatches(dump_pitch, dump_row_length_used, rcomp_dispatches);
++      for (uint32_t i = 0; i < rcomp_dispatch_count; ++i) {
++        rcomp_dump_tiles += uint64_t(rcomp_dispatches[i].width_tiles) * rcomp_dispatches[i].height_tiles;
++      }
++    }
++    RcompPassScope rcomp_pass_scope(
++        command_processor_, rcomp_pass::DumpClass(rt_key.key),
++        rcomp_dump_tiles * 1280 * draw_resolution_scale_x() * draw_resolution_scale_y(),
++        uint32_t(rcomp_dump_tiles), 2);
++#endif
+     command_processor_.BindExternalComputePipeline(pipeline);
+ 
+     VkPipelineLayout pipeline_layout =

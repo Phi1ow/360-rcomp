@@ -1,0 +1,4 @@
+# Bash scripts must remain executable by POSIX shells in Windows checkouts.
+*.sh text eol=lf
+# A unified diff represents empty context lines by one required space.
+*.patch whitespace=-blank-at-eol,-blank-at-eof

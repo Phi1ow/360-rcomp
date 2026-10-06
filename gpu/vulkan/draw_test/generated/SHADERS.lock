@@ -1,0 +1,6 @@
+tool: Glslang Version: 11:15.1.0
+flags: -V --target-env vulkan1.0
+glsl 4ffe8d7979be45b50cc73f31119ff0a0470020d9387a039c784656a315016ed4 shaders/triangle.vert
+spirv 2a4a39952b863b0df1e44cc88dfbcdb95b8d43b24a293632d9152e0c5c08de7e triangle.vert.spv (SPIR-V 1.0)
+glsl 6d4d01661ddcd8b195970e56f6fc920dd14da9d9db1356720cfa036f857dc9a2 shaders/triangle.frag
+spirv a79603be5bbb1f72de998e8abce27412ef9a9ddfd2d1c80322778364f86caece triangle.frag.spv (SPIR-V 1.0)

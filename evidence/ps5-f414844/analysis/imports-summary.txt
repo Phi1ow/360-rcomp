@@ -1,0 +1,8 @@
+1-platform                 NEEDED: ['libSceLibcInternal.prx', 'libkernel_web.prx']  imports=32  getpid=0xc068 HoLVWNanBBc#B#C
+2-cpu-corpus               NEEDED: ['libSceLibcInternal.prx', 'libkernel_web.prx']  imports=53  getpid=0xeb5f0 HoLVWNanBBc#B#C
+3-m3-program               NEEDED: ['libSceLibcInternal.prx', 'libkernel_web.prx']  imports=75  getpid=0x76cb0 HoLVWNanBBc#B#C
+4-vk-probe                 NEEDED: ['libSceAgc.prx', 'libSceAgcDriver.prx', 'libSceLibcInternal.prx', 'libSceVideoOut.prx', 'libkernel.prx']  imports=185  getpid=0x10737f8 HoLVWNanBBc#E#F
+5-vk-probe-experimental    NEEDED: ['libSceAgc.prx', 'libSceAgcDriver.prx', 'libSceLibcInternal.prx', 'libSceVideoOut.prx', 'libkernel.prx']  imports=185  getpid=0x10737f8 HoLVWNanBBc#E#F
+6-vk-draw-test             NEEDED: ['libSceAgc.prx', 'libSceAgcDriver.prx', 'libSceLibcInternal.prx', 'libSceVideoOut.prx', 'libkernel.prx']  imports=185  getpid=0x106b820 HoLVWNanBBc#E#F
+7-m5-graphics              NEEDED: ['libSceAgc.prx', 'libSceAgcDriver.prx', 'libSceLibcInternal.prx', 'libSceVideoOut.prx', 'libkernel.prx']  imports=213  getpid=0x110ed88 HoLVWNanBBc#E#F
+8-xex-title                NEEDED: ['libSceLibcInternal.prx', 'libkernel_web.prx']  imports=74  getpid=0x7ab30 HoLVWNanBBc#B#C

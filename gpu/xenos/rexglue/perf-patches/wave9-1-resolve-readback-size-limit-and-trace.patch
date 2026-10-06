@@ -1,0 +1,94 @@
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -65,6 +65,13 @@
+                     "Read data written by memory export in shaders on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// R-comp: a title that reads render-to-texture results on the CPU (Halo 3's HDR adaptation reads its small luminance resolves) needs readback_resolve, which costs a copy
++// for every resolve and, in the "full" mode, a wait for the GPU. With N > 0 only the resolves that write at most N bytes are read back (the others behave as with
++// readback_resolve=none). RCOMP-READBACK lines report the first read-backs (address, length, destination format and size, first words of the data).
++REXCVAR_DEFINE_INT32(rcomp_readback_resolve_max_bytes, 0, "GPU/Vulkan",
++                     "With readback_resolve: read back only the resolves that write at most this many bytes (0 = every resolve)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+                     "When async shader compilation is enabled, skip presenting frames that "
+                     "used placeholder pipelines to avoid visible flashing")
+@@ -877,6 +884,9 @@
+   elide_overwritten_color_ = REXCVAR_GET(rcomp_elide_overwritten_color_transfers);
+   skip_unchanged_constants_ = REXCVAR_GET(rcomp_skip_unchanged_constants);
+   revalidate_frames_ = uint32_t(std::max<int32_t>(REXCVAR_GET(rcomp_revalidate_frames), 1));
++  std::fprintf(stderr, "RCOMP-READBACK-RESOLVE mode=%u max_bytes=%d (mode 0 = none, 1 = fast, 2 = some, 3 = full)\n",
++               unsigned(GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve))),
++               int(REXCVAR_GET(rcomp_readback_resolve_max_bytes)));
+   async_submit_enabled_ = REXCVAR_GET(rcomp_async_submit);
+   if (async_submit_enabled_) {
+     std::fprintf(stderr, "RCOMP-ASYNC-SUBMIT on chunk_kib=%d\n", int(REXCVAR_GET(rcomp_async_chunk_kib)));
+@@ -5324,6 +5334,27 @@
+     return true;
+   }
+ 
++  // R-comp: rcomp_readback_resolve_max_bytes (the command processor thread only).
++  static const int32_t rcomp_readback_max_bytes = REXCVAR_GET(rcomp_readback_resolve_max_bytes);
++  static uint64_t rcomp_readbacks = 0, rcomp_readbacks_skipped = 0;
++  if (rcomp_readback_max_bytes > 0 && written_length > uint32_t(rcomp_readback_max_bytes)) {
++    ++rcomp_readbacks_skipped;
++    return true;
++  }
++  ++rcomp_readbacks;
++  const bool rcomp_readback_logged = rcomp_readbacks <= 32 || (rcomp_readbacks & 0xFFF) == 0;
++  if (rcomp_readback_logged) {
++    const auto log_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
++    const auto log_dest_pitch = register_file_->Get<reg::RB_COPY_DEST_PITCH>();
++    std::fprintf(stderr,
++                 "RCOMP-READBACK n=%llu skipped=%llu frame=%llu address=0x%08X length=0x%X fmt=%u pitch=%u height=%u scaled=%u mode=%u\n",
++                 (unsigned long long)rcomp_readbacks, (unsigned long long)rcomp_readbacks_skipped,
++                 (unsigned long long)frame_current_, written_address, written_length,
++                 unsigned(log_dest_info.copy_dest_format), unsigned(log_dest_pitch.copy_dest_pitch),
++                 unsigned(log_dest_pitch.copy_dest_height), unsigned(texture_cache_->IsDrawResolutionScaled()),
++                 unsigned(readback_mode));
++  }
++
+   auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
+     if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
+         readback.mapped_data[index] != nullptr) {
+@@ -5583,6 +5614,15 @@
+     if (destination) {
+       std::memcpy(destination, readback.mapped_data[read_index], written_length);
+       memory_->NoteCpWrite(written_address, written_length);
++      if (rcomp_readback_logged) {
++        // The first 32 bytes as stored in guest memory (guest byte order), the delayed slot or not.
++        uint32_t words[8] = {};
++        std::memcpy(words, destination, std::min<uint32_t>(written_length, uint32_t(sizeof(words))));
++        std::fprintf(stderr,
++                     "RCOMP-READBACK-DATA n=%llu slot=%u miss=%u words=%08X %08X %08X %08X %08X %08X %08X %08X\n",
++                     (unsigned long long)rcomp_readbacks, read_index, unsigned(is_cache_miss), words[0], words[1],
++                     words[2], words[3], words[4], words[5], words[6], words[7]);
++      }
+     }
+   }
+ 
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -2208,12 +2208,19 @@
+               unsigned(resolve_info.rb_copy_control.copy_src_select), 10);
+ #endif
+     if (n < 80 || (n % 2000) == 0)
+-      fprintf(stderr, "RCOMP-RESOLVE direct_ok=%llu direct_fallback=%llu #%u w=%u h=%u dest_base=0x%08X extent=0x%08X+0x%X src_select=%u color_base=%u path=%d clear_c=%d clear_d=%d fmt=%u\n", (unsigned long long)direct_resolve_success_count_, (unsigned long long)direct_resolve_fallback_count_, n,
++      // R-comp: rf = EDRAM format of the copied surface (color: xenos::ColorRenderTargetFormat, depth: DepthRenderTargetFormat), dz = copying depth,
++      // eb = destination exponent bias, ss = sample select, ms = MSAA of the surface, dn = destination number format, sw = red/blue swap.
++      fprintf(stderr, "RCOMP-RESOLVE direct_ok=%llu direct_fallback=%llu #%u w=%u h=%u dest_base=0x%08X extent=0x%08X+0x%X src_select=%u color_base=%u path=%d clear_c=%d clear_d=%d fmt=%u rf=%u dz=%u eb=%d ss=%u ms=%u dn=%u sw=%u\n", (unsigned long long)direct_resolve_success_count_, (unsigned long long)direct_resolve_fallback_count_, n,
+               resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8, resolve_info.copy_dest_base,
+               resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
+               unsigned(resolve_info.rb_copy_control.copy_src_select), unsigned(resolve_info.color_edram_info.base_tiles),
+               int(GetPath()), int(resolve_info.IsClearingColor()), int(resolve_info.IsClearingDepth()),
+-              unsigned(resolve_info.copy_dest_info.copy_dest_format));
++              unsigned(resolve_info.copy_dest_info.copy_dest_format),
++              unsigned(resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.format : resolve_info.color_edram_info.format),
++              unsigned(resolve_info.IsCopyingDepth()), int(resolve_info.copy_dest_info.copy_dest_exp_bias),
++              unsigned(resolve_info.copy_dest_coordinate_info.copy_sample_select),
++              unsigned(resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.msaa_samples : resolve_info.color_edram_info.msaa_samples),
++              unsigned(resolve_info.copy_dest_info.copy_dest_number), unsigned(resolve_info.copy_dest_info.copy_dest_swap));
+   }
+ #if RCOMP_XENOS_PROFILE_TIMINGS
+   if (command_processor_.RcompEventsOpen()) {  // event timeline (see VulkanCommandProcessor::RcompDrawEvent)

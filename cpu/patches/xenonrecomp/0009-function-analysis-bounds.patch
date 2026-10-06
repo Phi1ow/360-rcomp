@@ -1,0 +1,68 @@
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -42,7 +42,7 @@
+ {
+     Function fn{ base, 0 };
+ 
+-    if (*((uint32_t*)code + 1) == 0x04000048) // shifted ptr tail call
++    if (size >= 8 && *((uint32_t*)code + 1) == 0x04000048) // shifted ptr tail call
+     {
+         fn.size = 0x8;
+         return fn;
+@@ -62,7 +62,7 @@
+     #define RESTORE_DATA() if (!blockStack.empty()) data = (dataStart + ((blocks[blockStack.back()].base + blocks[blockStack.back()].size) / sizeof(*data))) - 1; // continue adds one
+ 
+     // TODO: Branch fallthrough
+-    for (; data <= dataEnd ; ++data)
++    for (; data < dataEnd ; ++data)
+     {
+         const size_t addr = base + ((data - dataStart) * sizeof(*data));
+         if (blockStack.empty())
+@@ -115,9 +115,9 @@
+             // these will be -1 if it's our first time seeing these blocks
+             auto lBlock = fn.SearchBlock(base + lBase);
+ 
+-            if (lBlock == -1)
++            if (lBlock == -1 && lBase < size)
+             {
+-                blocks.emplace_back(lBase, 0).projectedSize = rBase - lBase;
++                blocks.emplace_back(lBase, 0).projectedSize = (rBase > lBase && rBase < size) ? rBase - lBase : size_t(-1);
+                 lBlock = blocks.size() - 1;
+ 
+                 // push this first, this gets overriden by the true case as it'd be further away
+@@ -125,8 +125,11 @@
+                 blockStack.emplace_back(lBlock);
+             }
+ 
++            // A conditional branch before base (or beyond the supplied range)
++            // is a tail call. Keep its fallthrough block, but do not discover
++            // code outside this function; codegen preserves the taken branch.
+             size_t rBlock = fn.SearchBlock(base + rBase);
+-            if (rBlock == -1)
++            if (rBlock == -1 && branchDest >= base && branchDest - base < size)
+             {
+                 blocks.emplace_back(branchDest - base, 0);
+                 rBlock = blocks.size() - 1;
+@@ -151,9 +154,9 @@
+                     const size_t branchBase = branchDest - base;
+                     const size_t branchBlock = fn.SearchBlock(branchDest);
+ 
+-                    if (branchDest < base)
++                    if (branchDest < base || branchDest - base >= size)
+                     {
+-                        // Branches before base are just tail calls, no need to chase after those
++                        // Branches outside the supplied range are tail calls, not blocks of this function
+                         RESTORE_DATA();
+                         continue;
+                     }
+@@ -186,8 +189,8 @@
+                     {
+                         // right block's just going to return
+                         const size_t lBase = (addr - base) + 4;
+-                        size_t lBlock = fn.SearchBlock(lBase);
+-                        if (lBlock == -1)
++                        size_t lBlock = fn.SearchBlock(base + lBase);
++                        if (lBlock == -1 && lBase < size)
+                         {
+                             blocks.emplace_back(lBase, 0);
+                             lBlock = blocks.size() - 1;

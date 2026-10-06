@@ -1,0 +1,289 @@
+diff -ruN a/include/rex/graphics/gpu_host.h b/include/rex/graphics/gpu_host.h
+--- a/include/rex/graphics/gpu_host.h	2026-09-26 08:18:47.054428854 +0000
++++ b/include/rex/graphics/gpu_host.h	2026-09-26 08:06:44.458718581 +0000
+@@ -10,6 +10,10 @@
+ namespace rex::memory {
+ class Memory;
+ }
++namespace rex::ui {
++class GraphicsProvider;
++class Presenter;
++}
+ 
+ namespace rex::graphics {
+ 
+@@ -23,6 +27,14 @@
+   // Runs the title's graphics interrupt callback (source 0 = vblank,
+   // 1 = command stream interrupt); cpu 0xFFFFFFFF = any.
+   virtual void DispatchInterruptCallback(uint32_t source, uint32_t cpu) = 0;
++
++  // R-comp patch 0009 (rendering backends): the host graphics API provider
++  // and presenter (nullptr when the backend renders nowhere), the display
++  // mode the title was told about (VdQueryVideoMode), and host GPU loss.
++  virtual ui::GraphicsProvider* provider() const { return nullptr; }
++  virtual ui::Presenter* presenter() const { return nullptr; }
++  virtual void GetDisplayMode(uint32_t& width, uint32_t& height) const = 0;
++  virtual void OnHostGpuLossFromAnyThread(bool is_responsible) = 0;
+ };
+ 
+ }  // namespace rex::graphics
+diff -ruN a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+--- a/include/rex/graphics/vulkan/command_processor.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/graphics/vulkan/command_processor.h	2026-09-26 08:06:44.459019637 +0000
+@@ -28,7 +28,7 @@
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+ #include <rex/graphics/vulkan/deferred_command_buffer.h>
+-#include <rex/graphics/vulkan/graphics_system.h>
++#include <rex/graphics/gpu_host.h>  // R-comp patch 0009 (was graphics_system.h)
+ #include <rex/graphics/vulkan/pipeline_cache.h>
+ #include <rex/graphics/vulkan/primitive_processor.h>
+ #include <rex/graphics/vulkan/render_target_cache.h>
+@@ -37,7 +37,6 @@
+ #include <rex/graphics/vulkan/texture_cache.h>
+ #include <rex/graphics/xenos.h>
+ #include <rex/hash.h>
+-#include <rex/system/kernel_state.h>
+ #include <rex/ui/vulkan/linked_type_descriptor_set_allocator.h>
+ #include <rex/ui/vulkan/presenter.h>
+ #include <rex/ui/vulkan/provider.h>
+@@ -127,7 +126,8 @@
+     VkAccessFlags access_mask_ = 0;
+   };
+ 
+-  VulkanCommandProcessor(VulkanGraphicsSystem* graphics_system, system::KernelState* kernel_state);
++  // R-comp patch 0009: owned by a GpuHost providing a VulkanProvider.
++  explicit VulkanCommandProcessor(GpuHost* host);
+   ~VulkanCommandProcessor();
+ 
+   void ClearCaches() override;
+diff -ruN a/include/rex/ui/vulkan/api.h b/include/rex/ui/vulkan/api.h
+--- a/include/rex/ui/vulkan/api.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/ui/vulkan/api.h	2026-09-26 08:06:44.459421935 +0000
+@@ -32,7 +32,9 @@
+ #endif
+ #endif
+ 
+-#if REX_PLATFORM_GNU_LINUX
++// R-comp patch 0009: no desktop window system (RCOMP_XENOS_NO_WINDOW_SYSTEM):
++// the output goes to a headless presenter (host tests) or the PS5 display.
++#if REX_PLATFORM_GNU_LINUX && !defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)
+ #ifndef VK_USE_PLATFORM_XCB_KHR
+ #define VK_USE_PLATFORM_XCB_KHR
+ #endif
+diff -ruN a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+--- a/include/rex/ui/vulkan/instance.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/ui/vulkan/instance.h	2026-09-26 08:17:20.314330813 +0000
+@@ -15,7 +15,14 @@
+ 
+ #include <rex/platform.h>
+ #include <rex/platform/dynlib.h>
++// R-comp patch 0009: no RenderDoc in a PS5 title (no renderdoc_app.h for it).
++#if !defined(__PROSPERO__)
+ #include <rex/ui/renderdoc_api.h>
++#else
++namespace rex::ui {
++class RenderDocAPI;
++}
++#endif
+ #include <rex/ui/vulkan/api.h>
+ 
+ namespace rex {
+@@ -34,7 +41,11 @@
+   ~VulkanInstance();
+ 
+   // nullptr if RenderDoc is not connected.
++#if !defined(__PROSPERO__)
+   RenderDocAPI* renderdoc_api() const { return renderdoc_api_.get(); }
++#else
++  RenderDocAPI* renderdoc_api() const { return nullptr; }
++#endif
+ 
+   struct Functions {
+     // From the loader module.
+@@ -120,7 +131,9 @@
+  private:
+   explicit VulkanInstance() = default;
+ 
++#if !defined(__PROSPERO__)
+   std::unique_ptr<RenderDocAPI> renderdoc_api_;
++#endif
+ 
+   rex::platform::DynamicLibrary loader_;
+ 
+diff -ruN a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+--- a/src/graphics/command_processor.cpp	2026-09-26 08:18:47.065094796 +0000
++++ b/src/graphics/command_processor.cpp	2026-09-26 08:06:44.459836458 +0000
+@@ -598,6 +598,11 @@
+ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
+   SCOPE_profile_cpu_f("gpu");
+ 
++  // R-comp patch 0009: no fault-based write watches (no signal handlers on
++  // PS5); whatever the GPU caches may have been rewritten by the CPU before
++  // this kick (see shim rex/system/xmemory.h).
++  memory_->InvalidateWatchedPhysicalMemory();
++
+   // Execute commands!
+   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
+   reader.set_read_offset(read_index * sizeof(uint32_t));
+diff -ruN a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+--- a/src/graphics/vulkan/command_processor.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/graphics/vulkan/command_processor.cpp	2026-09-26 08:13:37.299804677 +0000
+@@ -34,12 +34,12 @@
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/vulkan/command_processor.h>
++#include <rcomp/diag.h>  // R-comp patch 0009
+ #include <rex/graphics/vulkan/pipeline_cache.h>
+ #include <rex/graphics/vulkan/render_target_cache.h>
+ #include <rex/graphics/vulkan/shader.h>
+ #include <rex/graphics/vulkan/shared_memory.h>
+ #include <rex/graphics/xenos.h>
+-#include <rex/kernel/xboxkrnl/video.h>
+ #include <rex/types.h>
+ #include <rex/memory/utils.h>
+ #include <rex/ui/flags.h>
+@@ -576,9 +576,8 @@
+     {VK_DESCRIPTOR_TYPE_SAMPLER, kLinkedTypeDescriptorPoolSetCount},
+ };
+ 
+-VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_system,
+-                                               system::KernelState* kernel_state)
+-    : CommandProcessor(graphics_system, kernel_state),
++VulkanCommandProcessor::VulkanCommandProcessor(GpuHost* graphics_system)  // R-comp patch 0009
++    : CommandProcessor(graphics_system),
+       deferred_command_buffer_(*this),
+       transient_descriptor_allocator_uniform_buffer_(
+           static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
+@@ -2286,7 +2285,8 @@
+   // In case the swap command is the only one in the frame.
+   if (!BeginSubmission(true)) {
+     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
+-    return;
++    // R-comp patch 0009: a frame is never dropped silently.
++    rcomp_fatal(RCOMP_FATAL_PLATFORM, "xenos: swap: Vulkan submission could not begin");
+   }
+ 
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+@@ -2317,7 +2317,8 @@
+       &frontbuffer_width_unscaled, &frontbuffer_height_unscaled, &swap_source_needs_rb_swap);
+   if (swap_texture_view == VK_NULL_HANDLE) {
+     REXGPU_ERROR("XELOG_GPU PRESENT: swap_texture_view=NULL");
+-    return;
++    // R-comp patch 0009: a frame is never dropped silently.
++    rcomp_fatal(RCOMP_FATAL_UNIMPLEMENTED, "xenos: swap: front buffer fetch constant not presentable");
+   }
+   // The swap gamma / FXAA pass samples source texels by pixel index, but swap
+   // textures may be allocation-padded. Prefer the active frontbuffer region
+@@ -2403,10 +2404,11 @@
+       frontbuffer_height_unscaled, guest_output_width, guest_output_height,
+       static_cast<uint32_t>(frontbuffer_format));
+ 
+-  system::X_VIDEO_MODE video_mode;
+-  kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+-  uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+-  uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
++  // R-comp patch 0009: display mode from the GpuHost (VdQueryVideoMode's source).
++  uint32_t display_width = 1, display_height = 1;
++  graphics_system_->GetDisplayMode(display_width, display_height);
++  display_width = std::max(uint32_t(1), display_width);
++  display_height = std::max(uint32_t(1), display_height);
+ 
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+diff -ruN a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+--- a/src/ui/vulkan/vulkan_instance.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/ui/vulkan/vulkan_instance.cpp	2026-09-26 08:06:44.462506814 +0000
+@@ -27,6 +27,11 @@
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
+ 
++#if defined(RCOMP_XENOS_LINKED_VULKAN)  // R-comp patch 0009 (VK_NO_PROTOTYPES is set)
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
++extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator);
++#endif
++
+ namespace rex {
+ namespace ui {
+ namespace vulkan {
+@@ -37,7 +42,9 @@
+ 
+   // Load the RenderDoc API if connected.
+ 
++#if !defined(__PROSPERO__)  // R-comp patch 0009: no RenderDoc in a PS5 title
+   vulkan_instance->renderdoc_api_ = RenderDocAPI::CreateIfConnected();
++#endif
+ 
+   // Load the loader library.
+ 
+@@ -74,6 +81,12 @@
+     }
+     return nullptr;
+   }
++#elif defined(RCOMP_XENOS_LINKED_VULKAN)
++  // R-comp patch 0009: Vulkan is linked into the binary (host: the Vulkan
++  // loader library; PS5: PS5_Vulkan), no run-time library loading.
++  loader_loaded = true;
++  ifn.vkGetInstanceProcAddr = &::vkGetInstanceProcAddr;
++  ifn.vkDestroyInstance = &::vkDestroyInstance;
+ #else
+   loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+   if (!loader_loaded) {
+@@ -82,11 +95,13 @@
+   }
+ #endif
+ 
++#if !defined(RCOMP_XENOS_LINKED_VULKAN)
+ #define XE_VULKAN_LOAD_LOADER_FUNCTION(name) \
+   functions_loaded &= (ifn.name = vulkan_instance->loader_.GetSymbol<PFN_##name>(#name)) != nullptr;
+   XE_VULKAN_LOAD_LOADER_FUNCTION(vkGetInstanceProcAddr);
+   XE_VULKAN_LOAD_LOADER_FUNCTION(vkDestroyInstance);
+ #undef XE_VULKAN_LOAD_LOADER_FUNCTION
++#endif
+   if (!functions_loaded) {
+     REXLOG_ERROR("Failed to get Vulkan loader function pointers");
+     return nullptr;
+diff -ruN a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+--- a/src/ui/vulkan/vulkan_presenter.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/ui/vulkan/vulkan_presenter.cpp	2026-09-26 08:06:44.463196863 +0000
+@@ -36,7 +36,7 @@
+ #if REX_PLATFORM_ANDROID
+ #include <rex/ui/surface_android.h>
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0009
+ #include <rex/ui/surface_gnulinux.h>
+ #endif
+ #if REX_PLATFORM_WIN32
+@@ -428,7 +428,7 @@
+     type_flags |= Surface::kTypeFlag_AndroidNativeWindow;
+   }
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0009
+   if (instance_extensions.ext_KHR_wayland_surface) {
+     type_flags |= Surface::kTypeFlag_WaylandSurface;
+   }
+@@ -809,7 +809,7 @@
+             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+       } break;
+ #endif
+-#if REX_PLATFORM_GNU_LINUX
++#if REX_PLATFORM_GNU_LINUX && !defined(RCOMP_XENOS_NO_WINDOW_SYSTEM)  // R-comp patch 0009
+       case Surface::kTypeIndex_XcbWindow: {
+         auto& xcb_window_surface = static_cast<const XcbWindowSurface&>(new_surface);
+         VkXcbSurfaceCreateInfoKHR surface_create_info;
+diff -ruN a/src/ui/vulkan/vulkan_provider.cpp b/src/ui/vulkan/vulkan_provider.cpp
+--- a/src/ui/vulkan/vulkan_provider.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/ui/vulkan/vulkan_provider.cpp	2026-09-26 08:06:44.464012294 +0000
+@@ -146,7 +146,9 @@
+     }
+   }
+ 
+-  if (with_presentation) {
++  // R-comp patch 0009: the presenter (and its samplers) is also used without
++  // a surface, to keep and capture the guest output (headless host tests).
++  {
+     provider->ui_samplers_ = UISamplers::Create(provider->vulkan_device_.get());
+     if (!provider->ui_samplers_) {
+       return nullptr;

@@ -1,0 +1,118 @@
+--- a/gpu/xenos/rexglue/rcomp/vulkan_display.h
++++ b/gpu/xenos/rexglue/rcomp/vulkan_display.h
+@@ -73,6 +73,9 @@
+     // Reuse only after acquiring this swapchain image again. A graphics
+     // submission fence alone does not cover the presentation semaphore wait.
+     std::vector<VkSemaphore> direct_rendered_;
++    // Actual presentation completion, not just graphics queue completion.
++    std::vector<VkFence> direct_presented_;
++    std::vector<bool> direct_present_pending_;
+     // Staging: the frame as an image of its own size, fed from a buffer.
+     uint32_t staging_w_ = 0, staging_h_ = 0;
+     VkBuffer upload_ = VK_NULL_HANDLE;
+--- a/gpu/xenos/rexglue/rcomp/vulkan_display.cpp
++++ b/gpu/xenos/rexglue/rcomp/vulkan_display.cpp
+@@ -368,6 +368,8 @@
+     const VkDevice device = dev->device();
+     const uint32_t w = source_extent.width, h = source_extent.height;
+     if (source_device != dev) return *error = "guest image belongs to a different Vulkan device", false;
++    if (!dev->properties().swapchainMaintenance1)
++        return *error = "direct presentation requires enabled swapchainMaintenance1 for safe shutdown", false;
+     if (source == VK_NULL_HANDLE || !w || !h) return *error = "empty guest image", false;
+     VkFormatProperties source_properties = {};
+     dev->vulkan_instance()->functions().vkGetPhysicalDeviceFormatProperties(
+@@ -389,6 +391,22 @@
+     r = WaitAndResetFence(device, fence_, dfn.vkWaitForFences, dfn.vkResetFences);
+     if (r != VK_SUCCESS) return *error = vk_error("wait/reset acquisition fence", r), false;
+     if (direct_rendered_.empty()) direct_rendered_.resize(images_.size(), VK_NULL_HANDLE);
++    if (direct_presented_.empty()) {
++        direct_presented_.resize(images_.size(), VK_NULL_HANDLE);
++        direct_present_pending_.resize(images_.size(), false);
++    }
++    VkFence& presented = direct_presented_[index];
++    if (direct_present_pending_[index]) {
++        r = WaitAndResetFence(device, presented, dfn.vkWaitForFences, dfn.vkResetFences);
++        if (r != VK_SUCCESS)
++            rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: presentation fence reuse failed (VkResult %d)", int(r));
++        direct_present_pending_[index] = false;
++    }
++    if (presented == VK_NULL_HANDLE) {
++        VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
++        r = dfn.vkCreateFence(device, &fci, nullptr, &presented);
++        if (r != VK_SUCCESS) return *error = vk_error("vkCreateFence(present)", r), false;
++    }
+     VkSemaphore& rendered = direct_rendered_[index];
+     if (rendered == VK_NULL_HANDLE) {
+         VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, nullptr, 0};
+@@ -445,18 +463,31 @@
+     pi.swapchainCount = 1;
+     pi.pSwapchains = &swapchain_;
+     pi.pImageIndices = &index;
++    VkSwapchainPresentFenceInfoEXT present_fence_info = {};
++    present_fence_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;
++    present_fence_info.swapchainCount = 1;
++    present_fence_info.pFences = &presented;
++    pi.pNext = &present_fence_info;
+     VkResult pr;
+     {
+         auto queue = dev->AcquireQueue(dev->queue_family_graphics_compute(), 0);
+         r = dfn.vkQueueSubmit(queue.queue(), 1, &si, fence_);
+-        if (r != VK_SUCCESS) return *error = vk_error("vkQueueSubmit", r), false;
++        if (r != VK_SUCCESS)
++            rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: guest blit submission failed (VkResult %d)", int(r));
+         pr = dfn.vkQueuePresentKHR(queue.queue(), &pi);
+     }
+     // Retain the borrowed guest image and mailbox lock until every read and
+     // layout restoration is complete, including the present-failure path.
+     r = WaitAndResetFence(device, fence_, dfn.vkWaitForFences, dfn.vkResetFences);
+-    if (r != VK_SUCCESS) return *error = vk_error("wait/reset guest blit fence", r), false;
+-    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) return *error = vk_error("vkQueuePresentKHR", pr), false;
++    if (r != VK_SUCCESS)
++        // Never release the visitor's consumer lock/image while GPU completion
++        // or layout restoration is unknown. This terminates inside the lease.
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: guest blit completion failed (VkResult %d)", int(r));
++    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR)
++        // An errored presentation may leave semaphore/fence state uncertain.
++        // Do not permit retry or teardown through a normal visitor return.
++        rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: guest presentation failed (VkResult %d)", int(pr));
++    direct_present_pending_[index] = true;
+     return true;
+ }
+ 
+@@ -466,20 +497,22 @@
+     const vk::VulkanDevice* dev = provider_->vulkan_device();
+     const auto& dfn = dev->functions();
+     const VkDevice device = dev->device();
+-    // Complete presentation semaphore waits as well as source-image work.
+-    if (!direct_rendered_.empty()) {
+-        const auto wait_queue = instance_fn<PFN_vkQueueWaitIdle>(
+-            *provider_->vulkan_instance(), "vkQueueWaitIdle");
+-        if (!wait_queue)
+-            rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: vkQueueWaitIdle is unavailable");
+-        auto queue = dev->AcquireQueue(dev->queue_family_graphics_compute(), 0);
+-        const VkResult idle = wait_queue(queue.queue());
+-        if (idle != VK_SUCCESS)
+-            rcomp_fatal(RCOMP_FATAL_PLATFORM, "display queue shutdown failed (VkResult %d)", int(idle));
+-        for (VkSemaphore semaphore : direct_rendered_)
+-            if (semaphore != VK_NULL_HANDLE) dfn.vkDestroySemaphore(device, semaphore, nullptr);
+-        direct_rendered_.clear();
+-    }
++    // A graphics QueueWaitIdle doesn't prove a WSI semaphore wait is over.
++    // Present fences supplied by swapchainMaintenance1 cover those waits.
++    for (size_t i = 0; i < direct_presented_.size(); ++i) {
++        if (direct_present_pending_[i]) {
++            const VkResult completed = dfn.vkWaitForFences(device, 1, &direct_presented_[i], VK_TRUE, UINT64_MAX);
++            if (completed != VK_SUCCESS)
++                rcomp_fatal(RCOMP_FATAL_PLATFORM, "display: presentation shutdown failed (VkResult %d)", int(completed));
++        }
++        if (direct_presented_[i] != VK_NULL_HANDLE)
++            dfn.vkDestroyFence(device, direct_presented_[i], nullptr);
++    }
++    direct_presented_.clear();
++    direct_present_pending_.clear();
++    for (VkSemaphore semaphore : direct_rendered_)
++        if (semaphore != VK_NULL_HANDLE) dfn.vkDestroySemaphore(device, semaphore, nullptr);
++    direct_rendered_.clear();
+     // Every Present waited for its own submission: nothing is in flight.
+     if (readback_) dfn.vkDestroyBuffer(device, readback_, nullptr);
+     if (readback_mem_) dfn.vkFreeMemory(device, readback_mem_, nullptr);

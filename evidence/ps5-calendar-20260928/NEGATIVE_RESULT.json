@@ -1,0 +1,26 @@
+{
+  "status": "PASS",
+  "expected_process_exit": 1,
+  "actual_process_exit": 1,
+  "expected_guest_exit": "0x0000E403",
+  "guest_exit_detected": true,
+  "single_expectation_mutation": {
+    "original_sha256": "a72b8c981cea67e0b593cf3b22313145e07a739054bc15faf0f82841150d4d9f",
+    "negative_sha256": "73b3164c7b63e93cd12a87332bbb1894045cb1cd6a6ad1a578f9e5c1f2e70617",
+    "replacement_from": ".quad 0x019db1ded53e8000",
+    "replacement_to": ".quad 0x019db1ded53e8001",
+    "replacement_count": 1
+  },
+  "tracked_fixture_sha256_after": "a72b8c981cea67e0b593cf3b22313145e07a739054bc15faf0f82841150d4d9f",
+  "tracked_fixture_unchanged": true,
+  "runtime_archives_unchanged": true,
+  "runtime_archives_sha256": {
+    "librcomp_xex_selftest.a": "d057547ea744d755f318e77f62df32b6107d252c4910396ba166199d8ba5ff24",
+    "platform/librcomp_platform.a": "2e6aeb585dbc528f76699151b8bdc498871c44acbb415a0d4eeeca5e1165c89f",
+    "runtime/librcomp_runtime_video.a": "f94a90011ee2c2baf00bf4d37cc0db960c7fec119a88014bacd318f2d287564d",
+    "runtime/librcomp_runtime.a": "be843060a4ba0bd34333503c58c9fcde44062ea6b903a93b7d883d9712ba1d49",
+    "platform/librcomp_platform_input.a": "00129aa5e99654cb6984dae4cf64e17d161ef720c7cb00d70f2e2a0f7e478de8"
+  },
+  "positive_plain_xex_sha256": "dceef0374cbfa35a848a3c7c86449087f7d3a44e14c9107412b15c35dcad8b53",
+  "negative_plain_xex_sha256": "ad959442f68fa03718058b9e033dc9fc7cf15725a356e5e8fcf77e82fead5206"
+}

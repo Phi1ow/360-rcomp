@@ -1,0 +1,83 @@
+diff -ru a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-30 16:24:19.813016300 +0200
++++ b/XenonRecomp/recompiler.cpp	2026-09-30 16:25:10.359126700 +0200
+@@ -445,6 +445,7 @@
+             {
+                 println("\t{} = ctx;", env());
+                 println("\t{}.s64 = setjmp(*reinterpret_cast<jmp_buf*>(base + {}.u32));", temp(), r(3));
++                println("\tPPC_WRITE_NOTIFY({}.u32, sizeof(jmp_buf));", r(3));
+                 println("\tif ({}.s64 != 0) ctx = {};", temp(), env());
+                 println("\t{} = {};", r(3), temp());
+             }
+@@ -902,6 +903,10 @@
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~31), 0, 32);", r(insn.operands[1]));
++        print("\tPPC_WRITE_NOTIFY((");
++        if (insn.operands[0] != 0)
++            print("{}.u32 + ", r(insn.operands[0]));
++        println("{}.u32) & ~31, 32);", r(insn.operands[1]));
+         break;
+ 
+     case PPC_INST_DCBZL:
+@@ -909,6 +914,10 @@
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~127), 0, 128);", r(insn.operands[1]));
++        print("\tPPC_WRITE_NOTIFY((");
++        if (insn.operands[0] != 0)
++            print("{}.u32 + ", r(insn.operands[0]));
++        println("{}.u32) & ~127, 128);", r(insn.operands[1]));
+         break;
+ 
+     case PPC_INST_DIVD:
+@@ -1611,6 +1620,10 @@
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32), {}.s64, __builtin_bswap64({}.s64));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        print("\tif ({}.eq) PPC_WRITE_NOTIFY(", cr(0));
++        if (insn.operands[1] != 0)
++            print("{}.u32 + ", r(insn.operands[1]));
++        println("{}.u32, 8);", r(insn.operands[2]));
+         println("\t{}.so = {}.so;", cr(0), xer());
+         break;
+ 
+@@ -1743,6 +1756,10 @@
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32) & ~0xF)), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]), v(insn.operands[0]));
++        print("\tPPC_WRITE_NOTIFY((");
++        if (insn.operands[1] != 0)
++            print("{}.u32 + ", r(insn.operands[1]));
++        println("{}.u32) & ~0xF, 16);", r(insn.operands[2]));
+         break;
+ 
+     case PPC_INST_STW:
+@@ -1766,6 +1783,10 @@
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32), {}.s32, __builtin_bswap32({}.s32));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        print("\tif ({}.eq) PPC_WRITE_NOTIFY(", cr(0));
++        if (insn.operands[1] != 0)
++            print("{}.u32 + ", r(insn.operands[1]));
++        println("{}.u32, 4);", r(insn.operands[2]));
+         println("\t{}.so = {}.so;", cr(0), xer());
+         break;
+ 
+diff -ru a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-09-30 16:24:20.044924700 +0200
++++ b/XenonUtils/ppc_context.h	2026-09-30 16:25:10.359126700 +0200
+@@ -107,6 +107,13 @@
+ #define PPC_MM_STORE_U32(x, y)  PPC_STORE_U32(x, y)
+ #endif
+ 
++// Direct guest memory writes that do not use PPC_STORE_* (vector stores, dcbz,
++// store-conditional, setjmp) are followed by PPC_WRITE_NOTIFY(address, size)
++// so a runtime can observe every guest CPU write. Default: no observer.
++#ifndef PPC_WRITE_NOTIFY
++#define PPC_WRITE_NOTIFY(x, size) ((void)0)
++#endif
++
+ #ifndef PPC_MM_STORE_U64
+ #define PPC_MM_STORE_U64(x, y)  PPC_STORE_U64(x, y)
+ #endif

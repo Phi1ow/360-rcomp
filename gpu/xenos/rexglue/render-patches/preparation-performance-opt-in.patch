@@ -1,0 +1,34 @@
+--- a/gpu/xenos/rexglue/prepare-archive.py
++++ b/gpu/xenos/rexglue/prepare-archive.py
+@@ -60,6 +60,8 @@
+     parser.add_argument('--out', type=Path, required=True)
+     parser.add_argument('--cache', type=Path, required=True)
+     parser.add_argument('--git', default='git', help='Git executable for exact patch application')
++    parser.add_argument('--descriptor-reuse', action='store_true',
++                        help='Opt in to the separately validated descriptor reuse candidate')
+     args = parser.parse_args()
+     git_tool = shutil.which(args.git)
+     if git_tool is None:
+@@ -115,6 +117,9 @@
+     # no sources are staged or committed. The R-comp working tree is untouched.
+     subprocess.run([git_tool, '-C', str(output), 'init', '-q'], check=True)
+     for patch in sorted((ROOT / 'gpu/xenos/rexglue/patches').glob('*.patch')):
++        if patch.name == '0012-reuse-texture-descriptors.patch' and not args.descriptor_reuse:
++            print('Skipped opt-in performance candidate', patch.name, flush=True)
++            continue
+         # Windows checkout may carry CRLF patches while codeload carries LF
+         # source. Canonicalize only the patch transport, never tracked evidence.
+         content = patch.read_bytes().replace(b'\r\n', b'\n')
+--- a/gpu/xenos/rexglue/prepare.sh
++++ b/gpu/xenos/rexglue/prepare.sh
+@@ -44,6 +44,10 @@
+ done
+ for p in "$root"/gpu/xenos/rexglue/patches/*.patch; do
+   [[ -e $p ]] || continue
++  if [[ $(basename "$p") == 0012-reuse-texture-descriptors.patch && ${RCOMP_XENOS_DESCRIPTOR_REUSE:-0} != 1 ]]; then
++    echo "skipped opt-in performance candidate $(basename "$p")"
++    continue
++  fi
+   patch -d "$dst" -p1 --quiet --forward <"$p"
+   echo "applied $(basename "$p") sha256:$(sha256sum "$p" | cut -d' ' -f1)"
+ done

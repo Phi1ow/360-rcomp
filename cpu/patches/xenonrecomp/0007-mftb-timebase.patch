@@ -1,0 +1,30 @@
+diff -ruN a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-09-25 22:53:39.222325307 +0000
++++ b/XenonRecomp/recompiler.cpp	2026-09-25 22:53:39.232303337 +0000
+@@ -1264,7 +1264,9 @@
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        // R-comp patch 0007: the Xenon timebase runs at 50 MHz; __rdtsc() is
++        // the host TSC. PPC_MFTB() defaults to the old behaviour.
++        println("\t{}.u64 = PPC_MFTB();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+diff -ruN a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-09-25 22:53:39.224403744 +0000
++++ b/XenonUtils/ppc_context.h	2026-09-25 22:53:45.580600630 +0000
+@@ -107,6 +107,12 @@
+ #ifndef PPC_UNRESOLVED_IMPORT
+ #define PPC_UNRESOLVED_IMPORT(module, ordinal) __builtin_trap()
+ #endif
++// R-comp patch 0007: mftb. Default = host TSC (upstream behaviour); the
++// R-comp prelude redefines it as the 50 MHz Xenon timebase.
++#ifndef PPC_MFTB
++#define PPC_MFTB() __rdtsc()
++#endif
++
+ #ifndef PPC_CALL_UNKNOWN
+ #define PPC_CALL_UNKNOWN(address) __builtin_trap()
+ #endif

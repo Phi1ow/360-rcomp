@@ -1,0 +1,117 @@
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1182,24 +1182,58 @@
+         println("{}.u32) & ~127, 128);", r(insn.operands[1]));
+         break;
+ 
++    // R-comp patch 0023: integer divisions go through PPC_DIVD / PPC_DIVDU / PPC_DIVW /
++    // PPC_DIVWU (ppc_context.h defaults, include/rcomp/ppc_prelude.h in R-comp). On Xenon a
++    // zero divisor, or the most negative value divided by -1 for the signed forms, does not
++    // trap: the quotient is architecturally undefined, and titles compute such quotients
++    // speculatively and discard them. A raw C++ division of those operands raises SIGFPE on
++    // x86-64. The record forms keep the CR0 update they had before this patch (divd. still
++    // has none and stays reported as "RC bit enabled but no comparison was generated").
++    // The OE forms (divdo divduo divwo divwuo, upstream unrecognized) set XER[OV] for exactly
++    // those operands and OR it into XER[SO]; both are computed before rD is written (rD may
++    // be rA or rB), so a record form copies the updated SO into CR0.
+     case PPC_INST_DIVD:
+-        println("\t{}.s64 = {}.s64 / {}.s64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++    case PPC_INST_DIVDO:
++        if (insn.opcode->id == PPC_INST_DIVDO)
++        {
++            println("\t{}.ov = PPC_DIVD_OVERFLOW({}.s64, {}.s64);", xer(), r(insn.operands[1]), r(insn.operands[2]));
++            println("\t{}.so |= {}.ov;", xer(), xer());
++        }
++        println("\t{}.s64 = PPC_DIVD({}.s64, {}.s64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+ 
+     case PPC_INST_DIVDU:
+-        println("\t{}.u64 = {}.u64 / {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++    case PPC_INST_DIVDUO:
++        if (insn.opcode->id == PPC_INST_DIVDUO)
++        {
++            println("\t{}.ov = PPC_DIVDU_OVERFLOW({}.u64, {}.u64);", xer(), r(insn.operands[1]), r(insn.operands[2]));
++            println("\t{}.so |= {}.ov;", xer(), xer());
++        }
++        println("\t{}.u64 = PPC_DIVDU({}.u64, {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVW:
+-        println("\t{}.s32 = {}.s32 / {}.s32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++    case PPC_INST_DIVWO:
++        if (insn.opcode->id == PPC_INST_DIVWO)
++        {
++            println("\t{}.ov = PPC_DIVW_OVERFLOW({}.s32, {}.s32);", xer(), r(insn.operands[1]), r(insn.operands[2]));
++            println("\t{}.so |= {}.ov;", xer(), xer());
++        }
++        println("\t{}.s32 = PPC_DIVW({}.s32, {}.s32);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVWU:
+-        println("\t{}.u32 = {}.u32 / {}.u32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++    case PPC_INST_DIVWUO:
++        if (insn.opcode->id == PPC_INST_DIVWUO)
++        {
++            println("\t{}.ov = PPC_DIVWU_OVERFLOW({}.u32, {}.u32);", xer(), r(insn.operands[1]), r(insn.operands[2]));
++            println("\t{}.so |= {}.ov;", xer(), xer());
++        }
++        println("\t{}.u32 = PPC_DIVWU({}.u32, {}.u32);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -159,6 +159,49 @@
+ #define PPC_TRAP(addr) __builtin_trap()
+ #endif
+ 
++// R-comp patch 0023: integer division (divw divwu divd divdu and their record / OE
++// forms). On Xenon a zero divisor, or the most negative value divided by -1 for the
++// signed forms, does not trap and leaves an architecturally undefined quotient; a raw
++// C++ division of those operands raises SIGFPE on x86-64. These defaults never trap:
++// divisor 0 -> 0, most negative / -1 -> most negative (wrap). That is a deterministic
++// choice, not what the hardware returns. *_OVERFLOW is the XER[OV] of the OE forms.
++// A host that defines PPC_DIVW defines all eight macros (the R-comp prelude does, with
++// the same values).
++#ifndef PPC_DIVW
++inline int32_t ppc_divw_default(int32_t a, int32_t b) noexcept
++{
++    return b == 0 ? 0 : b == -1 ? int32_t(0u - uint32_t(a)) : a / b;
++}
++inline uint32_t ppc_divwu_default(uint32_t a, uint32_t b) noexcept
++{
++    return b == 0 ? 0 : a / b;
++}
++inline int64_t ppc_divd_default(int64_t a, int64_t b) noexcept
++{
++    return b == 0 ? 0 : b == -1 ? int64_t(0ull - uint64_t(a)) : a / b;
++}
++inline uint64_t ppc_divdu_default(uint64_t a, uint64_t b) noexcept
++{
++    return b == 0 ? 0 : a / b;
++}
++inline uint8_t ppc_divw_overflow_default(int32_t a, int32_t b) noexcept
++{
++    return b == 0 || (b == -1 && a == INT32_MIN);
++}
++inline uint8_t ppc_divd_overflow_default(int64_t a, int64_t b) noexcept
++{
++    return b == 0 || (b == -1 && a == INT64_MIN);
++}
++#define PPC_DIVW(a, b) ppc_divw_default((a), (b))
++#define PPC_DIVWU(a, b) ppc_divwu_default((a), (b))
++#define PPC_DIVD(a, b) ppc_divd_default((a), (b))
++#define PPC_DIVDU(a, b) ppc_divdu_default((a), (b))
++#define PPC_DIVW_OVERFLOW(a, b) ppc_divw_overflow_default((a), (b))
++#define PPC_DIVWU_OVERFLOW(a, b) uint8_t(uint32_t(b) == 0)
++#define PPC_DIVD_OVERFLOW(a, b) ppc_divd_overflow_default((a), (b))
++#define PPC_DIVDU_OVERFLOW(a, b) uint8_t(uint64_t(b) == 0)
++#endif
++
+ #ifndef PPC_CALL_FUNC
+ #define PPC_CALL_FUNC(x) x(ctx, base)
+ #endif

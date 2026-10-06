@@ -1,0 +1,39 @@
+diff -ruN a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h	2026-09-25 23:19:38.177965065 +0000
+@@ -20,7 +20,16 @@
+ #include <rex/graphics/pipeline/shader/spirv_builder.h>
+ #include <rex/graphics/pipeline/shader/translator.h>
+ #include <rex/graphics/xenos.h>
++// R-comp patch: the translator can be built without rexglue's Vulkan device
++// layer (RCOMP_XENOS_NO_VULKAN_DEVICE); Features then come from Features(bool)
++// or are filled by the caller from its own device query.
++#ifndef RCOMP_XENOS_NO_VULKAN_DEVICE
+ #include <rex/ui/vulkan/device.h>
++#else
++namespace rex::ui::vulkan {
++class VulkanDevice;
++}
++#endif
+ 
+ namespace rex::graphics {
+ 
+diff -ruN a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp	2026-09-25 23:19:38.178597548 +0000
+@@ -44,6 +44,7 @@
+       demote_to_helper_invocation(all),
+       sample_rate_shading(all) {}
+ 
++#ifndef RCOMP_XENOS_NO_VULKAN_DEVICE  // R-comp patch
+ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
+     : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
+       full_draw_index_uint32(vulkan_device->properties().fullDrawIndexUint32),
+@@ -71,6 +72,7 @@
+     spirv_version = spv::Spv_1_0;
+   }
+ }
++#endif  // RCOMP_XENOS_NO_VULKAN_DEVICE
+ 
+ uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
+     uint32_t dynamic_addressable_register_count,

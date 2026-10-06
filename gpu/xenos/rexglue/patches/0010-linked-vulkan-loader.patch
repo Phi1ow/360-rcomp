@@ -1,0 +1,59 @@
+diff -ruN a/include/rex/ui/vulkan/instance.h b/include/rex/ui/vulkan/instance.h
+--- a/include/rex/ui/vulkan/instance.h	2026-09-26 08:26:57.438733553 +0000
++++ b/include/rex/ui/vulkan/instance.h	2026-09-26 08:22:47.560813552 +0000
+@@ -135,7 +135,9 @@
+   std::unique_ptr<RenderDocAPI> renderdoc_api_;
+ #endif
+ 
++#if !defined(RCOMP_XENOS_LINKED_VULKAN)  // R-comp patch 0010: no run-time loading
+   rex::platform::DynamicLibrary loader_;
++#endif
+ 
+   Functions functions_;
+ 
+diff -ruN a/src/ui/vulkan/vulkan_instance.cpp b/src/ui/vulkan/vulkan_instance.cpp
+--- a/src/ui/vulkan/vulkan_instance.cpp	2026-09-26 08:26:57.440491368 +0000
++++ b/src/ui/vulkan/vulkan_instance.cpp	2026-09-26 08:22:51.838088700 +0000
+@@ -29,7 +29,6 @@
+ 
+ #if defined(RCOMP_XENOS_LINKED_VULKAN)  // R-comp patch 0009 (VK_NO_PROTOTYPES is set)
+ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
+-extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator);
+ #endif
+ 
+ namespace rex {
+@@ -86,7 +85,8 @@
+   // loader library; PS5: PS5_Vulkan), no run-time library loading.
+   loader_loaded = true;
+   ifn.vkGetInstanceProcAddr = &::vkGetInstanceProcAddr;
+-  ifn.vkDestroyInstance = &::vkDestroyInstance;
++  // vkDestroyInstance is taken from the instance once it exists (a linked
++  // driver need not export it as a symbol).
+ #else
+   loader_loaded = vulkan_instance->loader_.Load(platform::lib_names::kVulkanLoader);
+   if (!loader_loaded) {
+@@ -398,6 +398,14 @@
+                  vk::to_string(vk::Result(instance_create_result)));
+     return nullptr;
+   }
++#if defined(RCOMP_XENOS_LINKED_VULKAN)  // R-comp patch 0010
++  ifn.vkDestroyInstance =
++      PFN_vkDestroyInstance(ifn.vkGetInstanceProcAddr(vulkan_instance->instance_, "vkDestroyInstance"));
++  if (!ifn.vkDestroyInstance) {
++    REXLOG_ERROR("vkDestroyInstance not resolved");
++    return nullptr;
++  }
++#endif
+ 
+   // Load instance functions.
+ 
+@@ -547,7 +555,9 @@
+     functions_.vkDestroyInstance(instance_, nullptr);
+   }
+ 
++#if !defined(RCOMP_XENOS_LINKED_VULKAN)  // R-comp patch 0010
+   loader_.Close();
++#endif
+ }
+ 
+ void VulkanInstance::EnumeratePhysicalDevices(

@@ -1,0 +1,163 @@
+diff --git a/XenosRecomp/pch.h b/XenosRecomp/pch.h
+index e59682c..c9592ad 100644
+--- a/XenosRecomp/pch.h
++++ b/XenosRecomp/pch.h
+@@ -12,6 +12,7 @@
+ #include <execution>
+ #include <filesystem>
+ #include <map>
++#include <set>
+ #include <smolv.h>
+ #include <fmt/core.h>
+ #include <string>
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 698a418..18d8d10 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -331,7 +331,15 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         out += "Bicubic";
+ #endif
+ 
++#ifdef XENOS_RECOMP_PS5
++    // PS5 profile: fixed descriptor slot per fetch constant and dimension
++    // (no bindless heap, no descriptor indices in memory).
++    print("_ps5(g_Texture{1}_s{0}, g_Sampler_s{0}, ", uint32_t(instr.constIndex), dimension);
++    usedTextures.emplace(uint32_t(instr.constIndex), std::string(dimension));
++    (void)constNamePtr;
++#else
+     print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
++#endif
+     printSrcRegister(componentCount);
+ 
+     switch (instr.dimension)
+@@ -1113,7 +1121,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
+     constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
+ 
++#ifdef XENOS_RECOMP_PS5
++    // PS5 profile: the stage's float4 register file is one uniform buffer at a
++    // fixed binding (set 0: VS=0, PS=1; shared constants=2 live in the prelude).
++    // No push-constant pointer, no vk::RawBufferLoad, no 64-bit integers.
++    println("[[vk::binding({}, 0)]] cbuffer {}ShaderConstants\n{{\n\tfloat4 g_{}ShaderConstants[{}];\n}};\n",
++        isPixelShader ? 1 : 0, isPixelShader ? "Pixel" : "Vertex", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 224 : 256);
++#else
+     out += "#ifdef __spirv__\n\n";
++#endif
+ 
+ #ifdef UNLEASHED_RECOMP
+     bool isMetaInstancer = false;
+@@ -1150,6 +1166,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         {
+             const char* shaderName = isPixelShader ? "Pixel" : "Vertex";
+ 
++#ifdef XENOS_RECOMP_PS5
++            if (constantInfo->registerCount > 1)
++            {
++                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
++                println("#define {}(INDEX) select((INDEX) < {}, g_{}ShaderConstants[{} + min(INDEX, {})], 0.0)",
++                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
++            }
++            else
++            {
++                println("#define {} g_{}ShaderConstants[{}]", constantName, shaderName, constantInfo->registerIndex.get());
++            }
++#else
+             if (constantInfo->registerCount > 1)
+             {
+                 uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
+@@ -1162,6 +1190,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 println("#define {} vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10)",
+                     constantName, shaderName, constantInfo->registerIndex * 16);
+             }
++#endif
+             
+             for (uint16_t j = 0; j < constantInfo->registerCount; j++)
+                 float4Constants.emplace(constantInfo->registerIndex + j, constantInfo);
+@@ -1171,6 +1200,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+         case RegisterSet::Sampler:
+         {
++#ifndef XENOS_RECOMP_PS5
+             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+             {
+                 println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+@@ -1179,6 +1209,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+                 constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
++#endif
+ 
+             samplers.emplace(constantInfo->registerIndex, constantName);
+             break;
+@@ -1187,6 +1218,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         }
+     }
+ 
++#ifdef XENOS_RECOMP_PS5
++    size_t resourceDeclarationOffset = out.size();
++#else
+     out += "\n#else\n\n";
+ 
+     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+@@ -1245,6 +1279,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     out += "};\n\n";
+ 
+     out += "#endif\n";
++#endif
+ 
+     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
+     {
+@@ -1876,6 +1911,39 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\t}\n";
+     }
+ 
++#ifdef XENOS_RECOMP_PS5
++    {
++        // One sampled image + one sampler per (fetch constant, dimension) the
++        // shader actually uses. Set 1 = pixel stage, set 2 = vertex stage;
++        // binding = 2*slot (image), 2*slot+1 (sampler). A slot fetched with two
++        // dimensions in one shader is a generator error, not a silent alias.
++        StringBuffer decl;
++        std::map<uint32_t, std::string> bySlot;
++        for (auto& [slot, dim] : usedTextures)
++        {
++            auto ins = bySlot.emplace(slot, dim);
++            if (!ins.second && ins.first->second != dim)
++            {
++                fmt::println(stderr, "XenosRecomp(PS5): fetch constant {} used as {} and {}", slot, ins.first->second, dim);
++                std::abort();
++            }
++        }
++        const uint32_t set = isPixelShader ? 1 : 2;
++        for (auto& [slot, dim] : bySlot)
++        {
++            const char* type = dim == "2D" ? "Texture2D<float4>" : dim == "3D" ? "Texture3D<float4>" : dim == "Cube" ? "TextureCube<float4>" : nullptr;
++            if (type == nullptr)
++            {
++                fmt::println(stderr, "XenosRecomp(PS5): unsupported texture dimension {} on fetch constant {}", dim, slot);
++                std::abort();
++            }
++            decl.println("[[vk::binding({}, {})]] {} g_Texture{}_s{};", slot * 2, set, type, dim, slot);
++            decl.println("[[vk::binding({}, {})]] SamplerState g_Sampler_s{};", slot * 2 + 1, set, slot);
++        }
++        out.insert(resourceDeclarationOffset, decl.out);
++    }
++#endif
++
+ #ifdef UNLEASHED_RECOMP
+     if (hasMtxProjection)
+         out += "\t}\n";
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index b2e317d..03383aa 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -33,6 +33,9 @@ struct ShaderRecompiler : StringBuffer
+     std::unordered_map<uint32_t, const char*> samplers;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
++#ifdef XENOS_RECOMP_PS5
++    std::set<std::pair<uint32_t, std::string>> usedTextures;
++#endif
+ 
+ #ifdef UNLEASHED_RECOMP
+     bool hasMtxProjection = false;

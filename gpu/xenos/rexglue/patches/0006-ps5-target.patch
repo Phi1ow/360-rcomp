@@ -1,0 +1,144 @@
+diff -ruN a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+--- a/include/rex/chrono/chrono.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/chrono/chrono.h	2026-09-26 06:52:21.436226598 +0000
+@@ -116,8 +116,9 @@
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
+-// Apple libc++ does not expose clock_time_conversion or clock_cast.
++#if defined(__APPLE__) || defined(__PROSPERO__)
++// Apple libc++ does not expose clock_time_conversion or clock_cast (nor does
++// the PS5 payload SDK's libc++; R-comp patch 0006).
+ template <class, class>
+ struct clock_time_conversion {};
+ 
+diff -ruN a/include/rex/platform.h b/include/rex/platform.h
+--- a/include/rex/platform.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/platform.h	2026-09-26 06:52:09.089833786 +0000
+@@ -38,6 +38,11 @@
+ #elif defined(__gnu_linux__)
+ #define REX_PLATFORM_GNU_LINUX 1
+ #define REX_PLATFORM_LINUX 1
++#elif defined(__PROSPERO__)
++// R-comp patch 0006: PS5 titles (FreeBSD-derived, POSIX threads); rexglue's
++// POSIX code paths are used, Linux-only calls are patched where needed.
++#define REX_PLATFORM_PS5 1
++#define REX_PLATFORM_LINUX 1
+ #else
+ #error Unsupported target OS.
+ #endif
+@@ -47,6 +52,9 @@
+ #ifndef REX_PLATFORM_MAC
+ #define REX_PLATFORM_MAC 0
+ #endif
++#ifndef REX_PLATFORM_PS5
++#define REX_PLATFORM_PS5 0
++#endif
+ #ifndef REX_PLATFORM_WIN32
+ #define REX_PLATFORM_WIN32 0
+ #endif
+diff -ruN a/include/rex/string/numeric.h b/include/rex/string/numeric.h
+--- a/include/rex/string/numeric.h	2026-09-25 13:05:53.000000000 +0000
++++ b/include/rex/string/numeric.h	2026-09-26 06:52:21.411917468 +0000
+@@ -26,7 +26,7 @@
+ #include <rex/string/utf8.h>
+ #include <rex/vec128.h>
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5  // R-comp patch 0006: same libc++ gaps
+ #include <locale.h>
+ #endif
+ 
+@@ -114,7 +114,7 @@
+   return result;
+ }
+ 
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5  // R-comp patch 0006: same libc++ gaps
+ template <typename T>
+ inline std::from_chars_result portable_float_from_chars(const char* first, const char* last,
+                                                         T& value) {
+@@ -189,7 +189,7 @@
+     }
+     std::memcpy(&result, &pun, sizeof(PUN));
+   } else {
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5  // R-comp patch 0006: same libc++ gaps
+     auto [p, error] = portable_float_from_chars(range.data(), range.data() + range.size(), result);
+ #else
+     auto [p, error] = std::from_chars(range.data(), range.data() + range.size(), result,
+@@ -316,7 +316,7 @@
+         assert_always();
+         return vec128_t();
+       }
+-#if REX_PLATFORM_MAC
++#if REX_PLATFORM_MAC || REX_PLATFORM_PS5  // R-comp patch 0006: same libc++ gaps
+       auto result = detail::portable_float_from_chars(p, end, v.f32[i]);
+ #else
+       auto result = std::from_chars(p, end, v.f32[i], std::chars_format::general);
+diff -ruN a/src/core/clock_posix.cpp b/src/core/clock_posix.cpp
+--- a/src/core/clock_posix.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/core/clock_posix.cpp	2026-09-26 06:55:13.419419494 +0000
+@@ -13,9 +13,16 @@
+ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
+ 
+ #include <sys/time.h>
++#include <time.h>
++
++#if defined(__PROSPERO__) && !defined(CLOCK_MONOTONIC_RAW)
++// R-comp patch 0006: no CLOCK_MONOTONIC_RAW on the PS5.
++#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
++#endif
+ 
+ #ifdef __APPLE__
+ #include <mach/mach_time.h>
++
+ #endif
+ 
+ namespace rex::chrono {
+diff -ruN a/src/core/filesystem_posix.cpp b/src/core/filesystem_posix.cpp
+--- a/src/core/filesystem_posix.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/core/filesystem_posix.cpp	2026-09-26 06:54:56.176009011 +0000
+@@ -35,6 +35,14 @@
+ #include <libgen.h>
+ #include <pwd.h>
+ 
++#if defined(__PROSPERO__)
++// R-comp patch 0006: off_t is 64-bit on the PS5 (FreeBSD); no *64 variants.
++#define fseeko64 fseeko
++#define ftello64 ftello
++#define ftruncate64 ftruncate
++#endif
++
++
+ // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
+ // explicit *64 forms for legacy 32-bit off_t distributions.
+ #if defined(__APPLE__)
+diff -ruN a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+--- a/src/graphics/flags.cpp	2026-09-25 13:05:53.000000000 +0000
++++ b/src/graphics/flags.cpp	2026-09-26 06:52:31.267271714 +0000
+@@ -11,7 +11,9 @@
+ 
+ #include <rex/graphics/flags.h>
+ #include <rex/logging.h>
++#if !defined(__PROSPERO__)  // R-comp patch 0006: no RenderDoc on PS5
+ #include <rex/ui/renderdoc_api.h>
++#endif
+ 
+ REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+                     "Allow invalid fetch constants");
+@@ -42,11 +44,13 @@
+       result = true;
+       REXLOG_INFO("GPU debug markers enabled via CVar");
+     } else {
++#if !defined(__PROSPERO__)
+       auto renderdoc_api = rex::ui::RenderDocAPI::CreateIfConnected();
+       if (renderdoc_api) {
+         result = true;
+         REXLOG_INFO("GPU debug markers auto-enabled (RenderDoc detected)");
+       }
++#endif
+     }
+   }
+   return result;

@@ -1,0 +1,201 @@
+diff -ru a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+--- a/XenonRecomp/recompiler.cpp	2026-10-03 03:49:27.854808000 +0200
++++ b/XenonRecomp/recompiler.cpp	2026-10-03 03:51:38.415358400 +0200
+@@ -538,12 +538,13 @@
+         {
+             if (address == config.longJmpAddress)
+             {
+-                println("\tlongjmp(*reinterpret_cast<jmp_buf*>(base + {}.u32), {}.s32);", r(3), r(4));
++                // R-comp patch 0020: every host pointer to guest data goes through PPC_HOST_PTR (ppc_context.h).
++                println("\tlongjmp(*reinterpret_cast<jmp_buf*>(PPC_HOST_PTR({}.u32)), {}.s32);", r(3), r(4));
+             }
+             else if (address == config.setJmpAddress)
+             {
+                 println("\t{} = ctx;", env());
+-                println("\t{}.s64 = setjmp(*reinterpret_cast<jmp_buf*>(base + {}.u32));", temp(), r(3));
++                println("\t{}.s64 = setjmp(*reinterpret_cast<jmp_buf*>(PPC_HOST_PTR({}.u32)));", temp(), r(3));
+                 println("\tPPC_WRITE_NOTIFY({}.u32, sizeof(jmp_buf));", r(3));
+                 println("\tif ({}.s64 != 0) ctx = {};", temp(), env());
+                 println("\t{} = {};", r(3), temp());
+@@ -1006,7 +1007,7 @@
+         break;
+ 
+     case PPC_INST_DCBZ:
+-        print("\tmemset(base + ((");
++        print("\tmemset(PPC_HOST_PTR((");
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~31), 0, 32);", r(insn.operands[1]));
+@@ -1017,7 +1018,7 @@
+         break;
+ 
+     case PPC_INST_DCBZL:
+-        print("\tmemset(base + ((");
++        print("\tmemset(PPC_HOST_PTR((");
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~127), 0, 128);", r(insn.operands[1]));
+@@ -1255,7 +1256,7 @@
+         break;
+ 
+     case PPC_INST_LDARX:
+-        print("\t{}.u64 = *(uint64_t*)(base + ", reserved());
++        print("\t{}.u64 = *(uint64_t*)PPC_HOST_PTR(", reserved());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32);", r(insn.operands[2]));
+@@ -1353,7 +1354,7 @@
+     case PPC_INST_LVX128:
+         // NOTE: for endian swapping, we reverse the whole vector instead of individual elements.
+         // this is accounted for in every instruction (eg. dp3 sums yzw instead of xyz)
+-        print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ((", v(insn.operands[0]));
++        print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(PPC_HOST_PTR((", v(insn.operands[0]));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32) & ~0xF))), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]));
+@@ -1365,7 +1366,7 @@
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32;", r(insn.operands[2]));
+-        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskL[({}.u32 & 0xF) * 16])));", v(insn.operands[0]), temp(), temp());
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(PPC_HOST_PTR({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskL[({}.u32 & 0xF) * 16])));", v(insn.operands[0]), temp(), temp());
+         break;
+ 
+     case PPC_INST_LVRX:
+@@ -1374,7 +1375,7 @@
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32;", r(insn.operands[2]));
+-        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, {}.u32 & 0xF ? simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskR[({}.u32 & 0xF) * 16])) : simde_mm_setzero_si128());", v(insn.operands[0]), temp(), temp(), temp());
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, {}.u32 & 0xF ? simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(PPC_HOST_PTR({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskR[({}.u32 & 0xF) * 16])) : simde_mm_setzero_si128());", v(insn.operands[0]), temp(), temp(), temp());
+         break;
+ 
+     case PPC_INST_LVSL:
+@@ -1401,7 +1402,7 @@
+         break;
+ 
+     case PPC_INST_LWARX:
+-        print("\t{}.u32 = *(uint32_t*)(base + ", reserved());
++        print("\t{}.u32 = *(uint32_t*)PPC_HOST_PTR(", reserved());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32);", r(insn.operands[2]));
+@@ -1723,10 +1724,10 @@
+     case PPC_INST_STDCX:
+         println("\t{}.lt = 0;", cr(0));
+         println("\t{}.gt = 0;", cr(0));
+-        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(base + ", cr(0));
++        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(PPC_HOST_PTR(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32), {}.s64, __builtin_bswap64({}.s64));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        println("{}.u32)), {}.s64, __builtin_bswap64({}.s64));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
+         print("\tif ({}.eq) PPC_WRITE_NOTIFY(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+@@ -1883,10 +1884,10 @@
+     case PPC_INST_STWCX:
+         println("\t{}.lt = 0;", cr(0));
+         println("\t{}.gt = 0;", cr(0));
+-        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(base + ", cr(0));
++        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(PPC_HOST_PTR(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32), {}.s32, __builtin_bswap32({}.s32));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        println("{}.u32)), {}.s32, __builtin_bswap32({}.s32));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
+         print("\tif ({}.eq) PPC_WRITE_NOTIFY(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+@@ -2949,6 +2950,9 @@
+ 
+         println("#define PPC_CODE_BASE 0x{:X}ull", codeMin);
+         println("#define PPC_CODE_SIZE 0x{:X}ull", codeMax - codeMin);
++        // R-comp patch 0020: this generator reaches guest data only through PPC_LOAD_*, PPC_STORE_*,
++        // PPC_VSTORE128 and PPC_HOST_PTR, so a host translating guest addresses can require it.
++        println("#define PPC_HOST_PTR_EMITTED 1");
+ 
+         println("");
+ 
+diff -ru a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+--- a/XenonUtils/ppc_context.h	2026-10-03 03:49:27.916229900 +0200
++++ b/XenonUtils/ppc_context.h	2026-10-03 03:51:49.924806200 +0200
+@@ -41,20 +41,29 @@
+ #define PPC_FUNC_PROLOGUE() __builtin_assume(((size_t)base & 0x1F) == 0)
+ #endif
+ 
++// R-comp patch 0020. Host pointer (uint8_t*) of the guest data address `x` (a 32-bit
++// effective address). The generated code and the defaults below reach guest data only
++// through it (or PPC_LOAD_*/PPC_STORE_*/PPC_VSTORE128); code addresses, the function
++// table and `base` passed to calls do not use it. The default is the flat mapping; a
++// host whose CPU address translation is not `base + x` overrides it.
++#ifndef PPC_HOST_PTR
++#define PPC_HOST_PTR(x) (base + (x))
++#endif
++
+ #ifndef PPC_LOAD_U8
+-#define PPC_LOAD_U8(x) *(volatile uint8_t*)(base + (x))
++#define PPC_LOAD_U8(x) *(volatile uint8_t*)PPC_HOST_PTR(x)
+ #endif
+ 
+ #ifndef PPC_LOAD_U16
+-#define PPC_LOAD_U16(x) __builtin_bswap16(*(volatile uint16_t*)(base + (x)))
++#define PPC_LOAD_U16(x) __builtin_bswap16(*(volatile uint16_t*)PPC_HOST_PTR(x))
+ #endif
+ 
+ #ifndef PPC_LOAD_U32
+-#define PPC_LOAD_U32(x) __builtin_bswap32(*(volatile uint32_t*)(base + (x)))
++#define PPC_LOAD_U32(x) __builtin_bswap32(*(volatile uint32_t*)PPC_HOST_PTR(x))
+ #endif
+ 
+ #ifndef PPC_LOAD_U64
+-#define PPC_LOAD_U64(x) __builtin_bswap64(*(volatile uint64_t*)(base + (x)))
++#define PPC_LOAD_U64(x) __builtin_bswap64(*(volatile uint64_t*)PPC_HOST_PTR(x))
+ #endif
+ 
+ // TODO: Implement.
+@@ -78,19 +87,19 @@
+ #endif
+ 
+ #ifndef PPC_STORE_U8
+-#define PPC_STORE_U8(x, y) *(volatile uint8_t*)(base + (x)) = (y)
++#define PPC_STORE_U8(x, y) *(volatile uint8_t*)PPC_HOST_PTR(x) = (y)
+ #endif
+ 
+ #ifndef PPC_STORE_U16
+-#define PPC_STORE_U16(x, y) *(volatile uint16_t*)(base + (x)) = __builtin_bswap16(y)
++#define PPC_STORE_U16(x, y) *(volatile uint16_t*)PPC_HOST_PTR(x) = __builtin_bswap16(y)
+ #endif
+ 
+ #ifndef PPC_STORE_U32
+-#define PPC_STORE_U32(x, y) *(volatile uint32_t*)(base + (x)) = __builtin_bswap32(y)
++#define PPC_STORE_U32(x, y) *(volatile uint32_t*)PPC_HOST_PTR(x) = __builtin_bswap32(y)
+ #endif
+ 
+ #ifndef PPC_STORE_U64
+-#define PPC_STORE_U64(x, y) *(volatile uint64_t*)(base + (x)) = __builtin_bswap64(y)
++#define PPC_STORE_U64(x, y) *(volatile uint64_t*)PPC_HOST_PTR(x) = __builtin_bswap64(y)
+ #endif
+ 
+ // MMIO Store handling is completely reliant on being preeceded by eieio.
+@@ -120,7 +129,7 @@
+ // whether the store changed anything overrides the macro and compares the old bytes.
+ #ifndef PPC_VSTORE128
+ #define PPC_VSTORE128(ea, value) do { const uint32_t ppc_vstore_ea_ = (ea); \
+-    simde_mm_store_si128((simde__m128i*)(base + ppc_vstore_ea_), (value)); \
++    simde_mm_store_si128((simde__m128i*)PPC_HOST_PTR(ppc_vstore_ea_), (value)); \
+     PPC_WRITE_NOTIFY(ppc_vstore_ea_, 16); } while (0)
+ #endif
+ 
+diff -ru a/XenonRecomp/test_recompiler.cpp b/XenonRecomp/test_recompiler.cpp
+--- a/XenonRecomp/test_recompiler.cpp	2026-10-03 11:54:59.896448500 +0200
++++ b/XenonRecomp/test_recompiler.cpp	2026-10-03 11:54:59.944533600 +0200
+@@ -50,6 +50,9 @@
+             recompiler.Analyse(stem);
+ 
+             recompiler.println("#define PPC_CONFIG_H_INCLUDED");
++            // R-comp patch 0020: these functions reach guest data only through PPC_HOST_PTR and the
++            // PPC_LOAD_*/PPC_STORE_*/PPC_VSTORE128 macros, like the ppc_config.h output (PPC_HOST_PTR_EMITTED).
++            recompiler.println("#define PPC_HOST_PTR_EMITTED 1");
+             recompiler.println("#include <ppc_context.h>\n");
+             recompiler.println("#define __builtin_debugtrap()\n");
+ 

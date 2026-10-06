@@ -1,0 +1,75 @@
+{
+  "contract": "Xbox virtual-memory allocation/protection/query provenance backed by GuestHeap",
+  "primary_references": [
+    {
+      "name": "Microsoft Learn: NtQueryVirtualMemory",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvirtualmemory",
+      "used_for": "page-rounded query address, MemoryBasicInformation class, matching-attribute subregions"
+    },
+    {
+      "name": "Microsoft Learn: NtAllocateVirtualMemory",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntallocatevirtualmemory",
+      "used_for": "reserve/commit/free states, input/output rounding semantics, PAGE_* allocation protection and NOCACHE/WRITECOMBINE modifiers"
+    },
+    {
+      "name": "Microsoft Learn: NtFreeVirtualMemory",
+      "url": "https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntfreevirtualmemory",
+      "used_for": "release changes a region to free and makes it available for later allocation"
+    },
+    {
+      "name": "Microsoft Learn: MEMORY_BASIC_INFORMATION",
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information",
+      "used_for": "BaseAddress/AllocationBase/RegionSize fields; MEM_COMMIT/MEM_RESERVE/MEM_FREE; undefined fields for MEM_FREE; MEM_PRIVATE/MEM_IMAGE"
+    },
+    {
+      "name": "Microsoft Learn: Memory Protection Constants",
+      "url": "https://learn.microsoft.com/en-us/windows/win32/memory/memory-protection-constants",
+      "used_for": "PAGE_NOACCESS/PAGE_READONLY/PAGE_READWRITE/PAGE_NOCACHE/PAGE_WRITECOMBINE numeric contracts"
+    },
+    {
+      "name": "Microsoft Learn: VirtualQuery",
+      "url": "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery",
+      "used_for": "coalescing only consecutive pages with common state/protection/allocation attributes"
+    }
+  ],
+  "xbox_abi_cross_check": {
+    "repository": "rexglue/rexglue-sdk",
+    "commit": "c94f5ebdcb3c9d1a460ca48e04f9758448f8d518",
+    "path": "src/kernel/xboxkrnl/xboxkrnl_memory.cpp",
+    "local_sha256": "80a1a7a55b75a6c05d0e57406cfe2db11ce97afc42140683e92ba400e516cc07",
+    "scope": "Xbox 7xBE32 (28-byte) query layout plus NtAllocate/NtFree/NtProtect/MmQuery/MmSet argument and PAGE_* flag shape cross-checks only; implementation not copied"
+  },
+  "ordinal_reference": {
+    "path": "third_party/XenonRecomp/XenonUtils/xbox/xboxkrnl_table.inc",
+    "sha256": "99bbdad7faaec18ce627eca28f0900b8e4a47c372000e43f85b447f07a2683ba",
+    "scope": "xboxkrnl names and ordinals only"
+  },
+  "gta_static_evidence": {
+    "execution_observed": false,
+    "services_summary": {
+      "path": "build/cpu-gta-entry-20260928/services-summary.json",
+      "sha256": "34d02c7d3da5bfbac14dd6fdd747ac23b731588522dfdcde21916da7dea5bab8",
+      "facts": "region_type=0; dynamic r3; output stack+96; reads +0/+12/+16; state comparisons include MEM_COMMIT/MEM_RESERVE"
+    },
+    "generated_callsite": {
+      "path": "build/prime-session-20260928/gtaiv-inventory-fixed/ppc/ppc_recomp.205.cpp",
+      "sha256": "e45bdfda6b791347007ae941bdb85a3ab91ea9e8633fd4e5803ab7d624643273",
+      "facts": "NtQuery call sites 0x829A6130 and 0x829A6188; r30=0x10000 MEM_FREE in the surrounding scan; MmQueryAddressProtect consumers mask return with 0x600 (NOCACHE|WRITECOMBINE)"
+    }
+  },
+  "platform_state_inputs": [
+    {
+      "path": "include/rcomp/guest_memory.h",
+      "sha256": "bb5ba83f10211b410f4cc6073ce19ca58d1972d95110d005088a22f9531296e0"
+    },
+    {
+      "path": "platform/common/guest_memory.cpp",
+      "sha256": "ecc6756c2bbdac3be909a1d08d54acd2c67e264748fd136752eb6929551fa736"
+    }
+  ],
+  "implemented_runtime_provenance": {
+    "GuestHeap": "live containing-allocation and allocator-region lookup; initial AllocationProtect; current PAGE_* protection spans; metadata removed on free",
+    "Runtime": "existing virtual_allocations/physical_allocations sets remain allocation-family ownership authority",
+    "GuestMemory": "unchanged; authoritative only for host page commit/base access, never for Xbox cache/write-combine modifiers or host-reservation-as-guest-state"
+  }
+}

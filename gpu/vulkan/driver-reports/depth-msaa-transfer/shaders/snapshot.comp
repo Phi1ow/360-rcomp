@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0) uniform sampler2DMS depth_image;
+layout(set=0,binding=1) uniform usampler2DMS stencil_image;
+layout(set=0,binding=2) uniform sampler2DMS color_image;
+layout(set=0,binding=3,std430) buffer Output { uvec4 values[]; } output_samples;
+layout(push_constant) uniform Push { uint mode,width,height,samples; float yscale,yoffset,xoffset; uint tag; } p;
+void main() {
+    uvec2 xy=gl_GlobalInvocationID.xy;
+    if(xy.x>=p.width || xy.y>=p.height) return;
+    for(uint sample_id=0u;sample_id<p.samples;++sample_id) {
+        uint i=(xy.y*p.width+xy.x)*p.samples+sample_id;
+        uint d=floatBitsToUint(texelFetch(depth_image,ivec2(xy),int(sample_id)).r);
+        uint s=texelFetch(stencil_image,ivec2(xy),int(sample_id)).r;
+        uint c=p.mode==1u ? packUnorm4x8(texelFetch(color_image,ivec2(xy),int(sample_id))):0u;
+        output_samples.values[i]=uvec4(d,s,c,0u);
+    }
+}

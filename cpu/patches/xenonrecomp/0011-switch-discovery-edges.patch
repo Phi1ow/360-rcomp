@@ -1,0 +1,207 @@
+--- a/XenonAnalyse/function.h
++++ b/XenonAnalyse/function.h
+@@ -2,6 +2,7 @@
+ 
+ #include <cstddef>
+ #include <vector>
++#include <unordered_map>
+ 
+ #ifdef _DEBUG
+ #define DEBUG(X) X
+@@ -47,5 +48,6 @@
+     }
+     
+     size_t SearchBlock(size_t address) const;
+-    static Function Analyze(const void* code, size_t size, size_t base);
++    using BranchTargets = std::unordered_map<size_t, std::vector<size_t>>;
++    static Function Analyze(const void* code, size_t size, size_t base, const BranchTargets* switches = nullptr);
+ };
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -38,7 +38,7 @@
+     return -1;
+ }
+ 
+-Function Function::Analyze(const void* code, size_t size, size_t base)
++Function Function::Analyze(const void* code, size_t size, size_t base, const BranchTargets* switches)
+ {
+     Function fn{ base, 0 };
+ 
+@@ -48,6 +48,7 @@
+         return fn;
+     }
+ 
++    bool hasSwitchEdges = false;
+     auto& blocks = fn.blocks;
+     blocks.reserve(8);
+     blocks.emplace_back();
+@@ -183,6 +184,27 @@
+                 }
+                 else if (op == PPC_OP_CTR)
+                 {
++                    if (xop == 528 && switches)
++                    {
++                        auto edges = switches->find(addr);
++                        if (edges != switches->end())
++                        {
++                            for (size_t target : edges->second)
++                            {
++                                if (target < base || target - base >= size || (target & 3) != 0)
++                                    continue;
++                                // This includes destinations already discovered by
++                                // a conditional/default edge. They still establish
++                                // that gaps between reachable blocks are legitimate.
++                                hasSwitchEdges = true;
++                                if (fn.SearchBlock(target) == size_t(-1))
++                                {
++                                    blocks.emplace_back(target - base, 0);
++                                    blockStack.emplace_back(blocks.size() - 1);
++                                }
++                            }
++                        }
++                    }
+                     // 5th bit of BO tells cpu to ignore the counter, which is a blr/bctr otherwise it's conditional
+                     const bool conditional = !(PPC_BO(instruction) & 0x10);
+                     if (conditional)
+@@ -233,7 +255,7 @@
+             break;
+         }
+ 
+-        if (discontinuity != -1)
++        if (discontinuity != -1 && !hasSwitchEdges)
+         {
+             blocks.erase(blocks.begin() + discontinuity, blocks.end());
+         }
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -93,8 +93,60 @@
+     return true;
+ }
+ 
+-void Recompiler::Analyse()
++bool Recompiler::Analyse()
+ {
++    Function::BranchTargets switchEdges;
++    for (const auto& [start, table] : config.switchTables)
++    {
++        const Section* section = nullptr;
++        for (const auto& candidate : image.sections)
++        {
++            if (start >= candidate.base && start - candidate.base < candidate.size)
++            {
++                section = &candidate;
++                break;
++            }
++        }
++        auto invalid = [&](const char* reason)
++        {
++            fmt::println("ERROR: invalid switch table at {:X}: {}", start, reason);
++            return false;
++        };
++        if (!section || !(section->flags & SectionFlags_Code) || (start & 3) != 0)
++            return invalid("base is not an aligned code address");
++        if (table.r >= 32 || table.labels.empty())
++            return invalid("invalid index register or empty labels");
++        for (const auto label : table.labels)
++        {
++            if ((label & 3) != 0 || label < section->base ||
++                label - section->base >= section->size || section->size - (label - section->base) < 4)
++                return invalid("label is not an aligned instruction in the same code section");
++        }
++        bool found = false;
++        const auto available = std::min<size_t>(64, section->size - (start - section->base));
++        for (size_t offset = 0; offset + 4 <= available; offset += 4)
++        {
++            auto* instruction = section->data + (start - section->base) + offset;
++            ppc_insn decoded;
++            ppc::Disassemble(instruction, 4, start + offset, decoded);
++            if (!decoded.opcode) break;
++            if (decoded.opcode->id == PPC_INST_BCTR)
++            {
++                if (switchEdges.find(start + offset) != switchEdges.end())
++                    return invalid("multiple table bases resolve to the same bctr");
++                switchEdges[start + offset].assign(table.labels.begin(), table.labels.end());
++                found = true;
++                break;
++            }
++            const auto word = ByteSwap(*reinterpret_cast<const uint32_t*>(instruction));
++            // Do not attach a table to an unrelated later basic block.
++            if (PPC_OP(word) == PPC_OP_B || PPC_OP(word) == PPC_OP_BC ||
++                (PPC_OP(word) == PPC_OP_CTR && (PPC_XOP(word) == 16 || PPC_XOP(word) == 528)))
++                break;
++        }
++        if (!found) return invalid("no bctr within 64 bytes of the same basic block and section");
++    }
++
+     for (size_t i = 14; i < 128; i++)
+     {
+         if (i < 32)
+@@ -193,6 +245,19 @@
+         }
+     }
+ 
++    std::vector<size_t> authoritativeStarts;
++    for (const auto& fn : functions) authoritativeStarts.push_back(fn.base);
++    std::sort(authoritativeStarts.begin(), authoritativeStarts.end());
++    authoritativeStarts.erase(std::unique(authoritativeStarts.begin(), authoritativeStarts.end()), authoritativeStarts.end());
++    auto analyzeBounded = [&](uint8_t* code, size_t size, size_t address)
++    {
++        // Snapshot only declared functions: discovery order must not change
++        // the boundary of another heuristic function. Lookup is O(log N).
++        const auto next = std::upper_bound(authoritativeStarts.begin(), authoritativeStarts.end(), address);
++        if (next != authoritativeStarts.end()) size = std::min(size, *next - address);
++        return Function::Analyze(code, size, address, &switchEdges);
++    };
++
+     for (const auto& section : image.sections)
+     {
+         if (!(section.flags & SectionFlags_Code))
+@@ -213,7 +278,7 @@
+                 if (address >= section.base && address < section.base + section.size && image.symbols.find(address) == image.symbols.end())
+                 {
+                     auto data = section.data + address - section.base;
+-                    auto& fn = functions.emplace_back(Function::Analyze(data, section.base + section.size - address, address));
++                    auto& fn = functions.emplace_back(analyzeBounded(data, section.base + section.size - address, address));
+                     image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+                 }
+             }
+@@ -242,7 +307,7 @@
+             }
+             else
+             {
+-                auto& fn = functions.emplace_back(Function::Analyze(data, dataEnd - data, base));
++                auto& fn = functions.emplace_back(analyzeBounded(data, dataEnd - data, base));
+                 image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+ 
+                 base += fn.size;
+@@ -252,6 +317,7 @@
+     }
+ 
+     std::sort(functions.begin(), functions.end(), [](auto& lhs, auto& rhs) { return lhs.base < rhs.base; });
++    return true;
+ }
+ 
+ bool Recompiler::Recompile(
+--- a/XenonRecomp/recompiler.h
++++ b/XenonRecomp/recompiler.h
+@@ -50,7 +50,7 @@
+         out += '\n';
+     }
+ 
+-    void Analyse();
++    bool Analyse();
+ 
+     // TODO: make a RecompileArgs struct instead this is getting messy
+     bool Recompile(
+--- a/XenonRecomp/main.cpp
++++ b/XenonRecomp/main.cpp
+@@ -25,7 +25,8 @@
+         if (!recompiler.LoadConfig(path))
+             return -1;
+ 
+-        recompiler.Analyse();
++        if (!recompiler.Analyse())
++            return EXIT_FAILURE;
+ 
+         auto entry = recompiler.image.symbols.find(recompiler.image.entry_point);
+         if (entry != recompiler.image.symbols.end())
