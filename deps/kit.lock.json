@@ -5,8 +5,8 @@
   "assets": [
     {
       "name": "rcomp-ps5-kit-toolchain-20261004.tar.gz",
-      "size": 78401055,
-      "sha256": "423e9a903e643fae6e3573f5ba0e0058823e1ca37baf640f94dfa53b9882c5b7",
+      "size": 78398308,
+      "sha256": "d1c4d1ba09ecbe66ac2f11cb2a8181adc58bb1afd5356ad614fb92a93bb7784b",
       "provides": [
         "build/vulkan-gta-radv-20260928/ps5-sdk/bin/prospero-clang",
         "build/vulkan-gta-radv-20260928/ps5-sdk/target/include/errno.h",
@@ -20,8 +20,8 @@
     },
     {
       "name": "rcomp-ps5-kit-xenos-source-v3-20261004.tar.gz",
-      "size": 13350944,
-      "sha256": "b17f01a50fb7d1923d2043bf1b294def4dcd900b737b3f210c9dca23fd70920d",
+      "size": 13350716,
+      "sha256": "f12cf4c31a4e3271dd5a1deefdbf49cc48633584f90522adac8474142dece4ea",
       "replace": ["build/prime-radv-resume-20260929/xenos-source-v3"],
       "provides": [
         "build/prime-radv-resume-20260929/xenos-source-v3/src/graphics/vulkan/command_processor.cpp"
@@ -29,8 +29,8 @@
     },
     {
       "name": "rcomp-ps5-kit-ps5vulkan-link-20261004.tar.gz",
-      "size": 19144,
-      "sha256": "a21884e7b858dc2c0def1a681caa2814e65714571db0ca1725a613fde6d5ecb1",
+      "size": 19146,
+      "sha256": "566b3df4e90537aae50f1c7b74488ea8b3471a3fee5b7554ea4d8e8ae6bf1ee9",
       "provides": [
         "build/vulkan-gta-radv-20260928/src/PS5_Vulkan/tools/radv-link.sh",
         "build/vulkan-gta-radv-20260928/src/PS5_Vulkan/vendor/ps5/sdk/stubs"
@@ -38,8 +38,8 @@
     },
     {
       "name": "rcomp-ps5-kit-link-extras-20261004.tar.gz",
-      "size": 1681906,
-      "sha256": "e64110729c4d85b0e6c369003731f2cdc083fbcb434d03ad88a3dddd4b374938",
+      "size": 1681886,
+      "sha256": "7289188ad1868c35b0817f298e9ecc0a8598681e5af9ac6a962781a77c39ec1b",
       "provides": [
         "build/platform-audioout-20260930/exports-9.40.json",
         "build/platform-ps5-title-kernel-boot/dist/PPSA88360/sce_sys/icon0.png",
