@@ -29,8 +29,8 @@ checksums were updated. No other byte changed.
 
 Raw klogs, binaries, XEX files and commercial data are not included.
 The complete evidence stays under `build/prime-calendar-resume-20260928/`,
-`build/platform-calendar-resume-20260928/` and the test folders cited in
-the [session report](../../docs/SESSION_CALENDAR_THREADS_20260928.md).
+`build/platform-calendar-resume-20260928/` and the session's test folders
+(not published).
 
 GTA IV remains **BLOCKED** by 166 missing functions and three missing
 variables; game execution and rendering for this slice are **NOT TESTED**.

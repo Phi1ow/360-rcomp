@@ -3,8 +3,7 @@
 2026-09-28 update: XEX static TLS is parsed, snapshotted and initialized per
 guest thread; `KeTls*` remains separate. Runtime shutdown quiesces managed
 workers before memory destruction; external entry/callback producers must be
-joined by the owner. IRQ caches carry a runtime lifetime identity. See the
-[host integration evidence and ABI subset](../../docs/HOST_INTEGRATION_20260928.md).
+joined by the owner. IRQ caches carry a runtime lifetime identity.
 
 Library `rcomp_runtime` (C++17, namespace `rcomp::rt`), headers in `runtime/include/rcomp/runtime/`.
 Links against the platform implementation of `include/rcomp/{diag,guest_memory}.h` (Agent 2).

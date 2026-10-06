@@ -1,6 +1,6 @@
 # R-comp shelf
 
-The game menu for [R-comp](../rcomp) titles on a jailbroken PS5: a 3D cover-flow shelf of the statically
+The game menu for [R-comp](../README.md) titles on a jailbroken PS5: a 3D cover-flow shelf of the statically
 recompiled Xbox 360 games, to **play** the installed ones and to **install** the packaged ones. It is its own PS5
 application (title id `PPSA88300`), separate from every game.
 

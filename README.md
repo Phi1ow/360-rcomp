@@ -20,8 +20,7 @@ is not supported: it may boot to a menu or further, but it is not playable from 
 | Episodes from Liberty City (EFLC) | **Works**: boots to the episode menu and into The Ballad of Gay Tony, played on the PS5 on 4 October 2026. Its saves and The Lost and Damned are not tested yet. | 49-56 fps in scripted 90 s windows of The Ballad of Gay Tony (2 and 4 October 2026) , use capped 30 fps to get less stuttering |
 | Other games (Gears of War 2, Halo 3, ...) | In bring-up, **not supported yet** | not measured for release |
 
-**4K at a constant 60 fps is not reached** in the heaviest scenes of GTA IV. Details are in
-[docs/PERF_4K30_20260929.md](docs/PERF_4K30_20260929.md).
+**4K at a constant 60 fps is not reached** in the heaviest scenes of GTA IV.
 
 **Imports.** GTA IV runs with every XAM import implemented and 145 of its 150 kernel imports.
 
@@ -94,11 +93,9 @@ You need:
 | `tools/` | Pipeline scripts: inventory, archives, disc catalog, console test kit |
 | `rcomp-installer/` | The installer web app |
 | `rcomp-shelf/` | A cover-flow launcher for the installed titles (GPL-3.0-or-later, see its NOTICE) |
-| `docs/` | Architecture, status, performance journal and bring-up reports |
+| `docs/` | The Windows installation guide and evidence files |
 
-To install a game, follow [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md). To understand the project, start
-with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/STATUS.md](docs/STATUS.md). The rules for contributors
-are in [AGENTS.md](AGENTS.md).
+To install a game, follow [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md).
 
 ## Host checks
 
@@ -113,6 +110,10 @@ toolchain); a Windows PC that only installs games does not need them. They use s
 validation is never PS5 evidence.
 
 ## Credits and licences
+
+R-comp is free software, licensed under the **GNU General Public License, version 3 or (at your option)
+any later version** ([LICENSE](LICENSE)). Files that carry their own licence notice, such as the adapted
+rexglue-sdk code and `third_party/`, keep it.
 
 Dependencies are pinned with their licences in [deps/deps.lock](deps/deps.lock). They include:
 

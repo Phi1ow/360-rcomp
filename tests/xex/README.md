@@ -64,9 +64,6 @@ seconds. Two negative host packages (missing or malformed XEX) must fail
 before PPC entry. No HLE import is doubled; the GPU boundary stays
 `TESTDOUBLE_cpu_only_gpu`, with no graphics proof.
 
-Commands, results and limits:
-[session report](../../docs/HOST_INTEGRATION_20260928.md).
-
 The exclusive `RCOMP_XEX_MODULES=ON` mode uses `rcomp_modules.s` and
 `modules_runner.cpp`, with the same archive entry point and only the
 packaged XEX. The 21 PPC steps check the four module/command-line/monitor
